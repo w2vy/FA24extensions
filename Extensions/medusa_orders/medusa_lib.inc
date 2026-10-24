@@ -87,7 +87,7 @@ function medusa_stripe_fee($charge_id) {
 
 // ---- orders -----------------------------------------------------------------
 
-$MEDUSA_ORDER_FIELDS = 'id,display_id,email,created_at,currency_code,status,payment_status,fulfillment_status,'
+$MEDUSA_ORDER_FIELDS = 'id,display_id,email,created_at,currency_code,status,payment_status,fulfillment_status,metadata,'
     . 'shipping_subtotal,tax_total,total,*shipping_address,*billing_address,'
     . 'items.variant_sku,items.title,items.quantity,items.unit_price,items.subtotal,'
     . 'items.tax_lines.code,items.variant.metadata,'
@@ -96,6 +96,8 @@ $MEDUSA_ORDER_FIELDS = 'id,display_id,email,created_at,currency_code,status,paym
 
 /** Paid (captured, or since refunded) AND fulfilled (label bought) or shipped/delivered. */
 function medusa_order_ready($o) {
+    // Old Woo orders loaded into the shop (phase 4) are in FA already, by woo_orders.
+    if (!empty($o['metadata']['migrated_from'])) return false;
     return $o['status'] != 'canceled'
         && in_array($o['payment_status'], array('captured', 'partially_refunded', 'refunded'))
         && in_array($o['fulfillment_status'], array('fulfilled', 'shipped', 'delivered'));
