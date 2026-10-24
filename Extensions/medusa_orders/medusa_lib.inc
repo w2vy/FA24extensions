@@ -76,7 +76,7 @@ function medusa_stripe_fee($charge_id) {
 // ---- orders -----------------------------------------------------------------
 
 $MEDUSA_ORDER_FIELDS = 'id,display_id,email,created_at,currency_code,status,payment_status,fulfillment_status,'
-    . 'shipping_total,tax_total,total,*shipping_address,*billing_address,'
+    . 'shipping_subtotal,tax_total,total,*shipping_address,*billing_address,'
     . 'items.variant_sku,items.title,items.quantity,items.unit_price,items.subtotal,'
     . 'items.tax_lines.code,items.variant.metadata,'
     . 'payment_collections.payments.id,payment_collections.payments.amount,payment_collections.payments.data,'
@@ -248,7 +248,7 @@ function medusa_import_order($o, $opts) {
     $cart->deliver_to = $branch['br_name'];
     $cart->delivery_address = $branch['br_address'];
     $cart->set_branch($branch['branch_code'], $taxgid, '', isset($a['phone']) ? $a['phone'] : '', $email);
-    $cart->freight_cost = round((float)$o['shipping_total'], 2);
+    $cart->freight_cost = round((float)$o['shipping_subtotal'], 2);
     $cart->Location = $branch['default_location'];
     foreach ($o['items'] as $it)
         foreach (medusa_fa_lines($it, $opts['sales_type']) as $l)
