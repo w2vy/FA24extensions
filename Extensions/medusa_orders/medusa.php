@@ -21,6 +21,7 @@ include_once($path_to_root . "/sales/includes/cart_class.inc");
 include_once($path_to_root . "/sales/includes/ui/sales_order_ui.inc");
 include_once($path_to_root . "/inventory/includes/db/items_prices_db.inc");
 include_once($path_to_root . "/modules/medusa_orders/medusa_lib.inc");
+include_once($path_to_root . "/modules/medusa_orders/medusa_push.inc");
 
 check_db_has_sales_areas("You must first define atleast one Sales Area");
 
@@ -29,7 +30,7 @@ $action = isset($_GET['action']) ? $_GET['action'] : 'summary';
 if (isset($_POST['action'])) $action = $_POST['action'];
 if (!$found && $action != 'create') $action = 'show';
 
-$SETTINGS = array('url', 'apikey', 'stripekey', 'startorder', 'taxgroup', 'bank');
+$SETTINGS = array('url', 'apikey', 'stripekey', 'startorder', 'taxgroup', 'bank', 'location');
 
 if ($action == 'create') {
     medusa_create_table();
@@ -71,8 +72,24 @@ if ($action == 'o_import') {
     }
 }
 
+$push_log = array();
+if ($action == 'p_push') {
+    // Orders shipped in the shop but not yet in FA would be counted twice as stock.
+    $error = '';
+    $waiting = medusa_orders_to_import(medusa_get('startorder', 0), $error);
+    if ($error != '') display_error($error);
+    elseif (count($waiting)) display_error(count($waiting)." shop order(s) are waiting: run Order Import first.");
+    else {
+        list($rows, $variants, $links, $levels, $error) = medusa_push_plan(medusa_get('location', 'DEF'));
+        if ($error != '') display_error($error);
+        else $push_log = medusa_push_apply($variants, $links, $levels);
+    }
+    $action = 'push';
+}
+
 page("Medusa Shop Interface");
-$tabs = array('summary' => 'Summary', 'show' => 'Configuration', 'oimport' => 'Order Import');
+$tabs = array('summary' => 'Summary', 'show' => 'Configuration', 'oimport' => 'Order Import',
+    'push' => 'Price + Stock Push');
 $sep = '';
 foreach ($tabs as $a => $label) {
     echo $sep;
@@ -109,12 +126,13 @@ if ($action == 'show') {
     table_header(array("Setting", "Value"));
     label_row("Table Status", $found ? "Found" : "<font color=red>Not Found</font>");
     if ($found) {
-        text_row("Shop URL (https://…)", 'url', medusa_get('url'), 40, 200);
+        text_row("Shop URL (https://...)", 'url', medusa_get('url'), 40, 200);
         text_row("Medusa secret API key" . (medusa_get('apikey') != '' ? " (saved; blank = keep)" : ""), 'apikey', '', 40, 200);
         text_row("Stripe read key" . (medusa_get('stripekey') != '' ? " (saved; blank = keep)" : ""), 'stripekey', '', 40, 200);
         text_row("Last imported shop order #", 'startorder', medusa_get('startorder', 0), 10, 20);
         tax_groups_list_row(_("Tax group outside Florida:"), 'taxgroup', medusa_get('taxgroup'));
         bank_accounts_list_row(_("Bank account for payments:"), 'bank', medusa_get('bank'));
+        locations_list_row(_("Shop stock location:"), 'location', medusa_get('location', 'DEF'));
     }
     end_table(1);
     if (!$found) {
@@ -163,6 +181,29 @@ if ($action == 'oimport') {
 
     hidden('action', 'o_import');
     submit_center('oimport', "Import Shop Orders");
+    end_form();
+    end_page();
+}
+
+if ($action == 'push') {
+    foreach ($push_log as $line) display_notification($line);
+    $error = '';
+    list($rows, $variants, $links, $levels, $error) = medusa_push_plan(medusa_get('location', 'DEF'));
+    if ($error != '') display_error($error);
+    display_note("Changes the push would make now (FA is the master; stock in shop units: oz, half kg, each).", 0, 1);
+    start_table(TABLESTYLE);
+    table_header(array("Change", "SKU", "Shop now", "From FA", "Note"));
+    $k = 0;
+    foreach ($rows as $r) {
+        alt_table_row_color($k);
+        foreach ($r as $c) label_cell($c);
+        end_row();
+    }
+    if (!count($rows) && $error == '') label_row("", "Nothing to change: the shop matches FA.", "colspan=4");
+    end_table(1);
+    start_form(true);
+    hidden('action', 'p_push');
+    submit_center('p_push', "Push to Shop");
     end_form();
     end_page();
 }

@@ -272,7 +272,7 @@ function medusa_import_order($o, $opts) {
         }
     }
     commit_transaction();
-    return "Order #$n → FA sales order $order_no for $name" . ($is_new ? ' (new customer)' : '')
+    return "Order #$n -> FA sales order $order_no for $name" . ($is_new ? ' (new customer)' : '')
         . (count($pays) ? '; payment ' . implode(', ', $pays) : '; no captured payment');
 }
 
