@@ -229,24 +229,46 @@ function medusa_push_plan($loc) {
     return array($rows, $variants, $links, $levels, $error);
 }
 
-/** Applies a plan; returns lines of text for the screen. */
+/** Applies a plan; returns [lines of text for the screen, errors]. */
 function medusa_push_apply($variants, $links, $levels) {
     $log = array();
+    $errors = array();
     $n = 0;
     foreach ($variants as $pid => $upd) {
         list($st, $r, $err) = medusa_api('POST', "/admin/products/$pid/variants/batch", array(), array('update' => $upd));
-        if ($err != '') $log[] = "Product $pid variants: $err"; else $n += count($upd);
+        if ($err != '') $errors[] = "Product $pid variants: $err"; else $n += count($upd);
     }
     $log[] = "$n variant(s) updated";
     $n = 0;
     foreach ($links as $pid => $b) {
         list($st, $r, $err) = medusa_api('POST', "/admin/products/$pid/variants/inventory-items/batch", array(), $b);
-        if ($err != '') $log[] = "Product $pid stock links: $err"; else $n++;
+        if ($err != '') $errors[] = "Product $pid stock links: $err"; else $n++;
     }
     $log[] = "Stock links changed on $n product(s)";
     if (count($levels)) {
         list($st, $r, $err) = medusa_api('POST', '/admin/inventory-items/location-levels/batch', array(), array('update' => $levels));
-        $log[] = $err != '' ? "Stock levels: $err" : count($levels)." stock level(s) set";
-    } else $log[] = "Stock levels already match";
-    return $log;
+        if ($err != '') $errors[] = "Stock levels: $err"; else $log[] = count($levels)." stock level(s) set";
+    } else $log[] = "Stock levels unchanged";
+    return array($log, $errors);
+}
+
+/**
+ * One push: prices, links and kit parts always; stock levels only when no shop
+ * order is waiting for import (FA doesn't know about those yet, so its count
+ * would put the shipped items back). Returns [lines, errors].
+ */
+function medusa_run_push() {
+    $error = '';
+    $waiting = medusa_orders_to_import(medusa_get('startorder', 0), $error);
+    if ($error != '') return array(array(), array($error));
+    list($rows, $variants, $links, $levels, $error) = medusa_push_plan(medusa_get('location', 'DEF'));
+    if ($error != '') return array(array(), array($error));
+    $lines = array();
+    if (count($waiting) && count($levels)) {
+        $lines[] = "Stock held back: ".count($waiting)." shop order(s) waiting for import";
+        $levels = array();
+    }
+    list($log, $errors) = medusa_push_apply($variants, $links, $levels);
+    foreach ($rows as $r) if ($r[0] == 'warning') $errors[] = "Push: $r[1] $r[2]";
+    return array(array_merge($lines, $log), $errors);
 }

@@ -29,6 +29,7 @@ $found = medusa_table_exists();
 $action = isset($_GET['action']) ? $_GET['action'] : 'summary';
 if (isset($_POST['action'])) $action = $_POST['action'];
 if (!$found && $action != 'create') $action = 'show';
+if ($found) medusa_upgrade_table();
 
 $SETTINGS = array('url', 'apikey', 'stripekey', 'startorder', 'taxgroup', 'bank', 'location');
 
@@ -48,42 +49,45 @@ if ($action == 'update') {
     $action = 'show';
 }
 
+// The timer (w2vy cron, medusa_sync.sh): import, then push, as plain text.
+// "ERROR: " lines are mailed; "DONE" last means the run finished.
+if ($action == 'cron') {
+    header('Content-Type: text/plain; charset=utf-8');
+    $opts = medusa_import_opts();
+    if (!$opts) {
+        echo "ERROR: no import options saved yet: run one Order Import by hand first\n";
+    } else {
+        list($lines, $errors) = medusa_run_import($opts);
+        foreach ($lines as $l) echo "$l\n";
+        foreach ($errors as $e) echo "ERROR: $e\n";
+        list($lines, $errors) = medusa_run_push();
+        foreach ($lines as $l) echo "$l\n";
+        foreach ($errors as $e) echo "ERROR: $e\n";
+    }
+    echo "DONE\n";
+    exit;
+}
+
 $import_log = array();
+$import_errors = array();
 if ($action == 'o_import') {
     if (!check_num('credit_limit', 0)) {
         display_error(_("The credit limit must be numeric and not less than zero."));
         $action = 'oimport';
     } else {
-        $error = '';
-        $orders = medusa_orders_to_import(medusa_get('startorder', 0), $error);
-        if ($error != '') display_error($error);
-        $opts = array(
-            'currency' => get_post('currency'), 'payment_terms' => get_post('payment_terms'),
-            'credit_limit' => input_num('credit_limit'), 'sales_type' => get_post('sales_type'),
-            'salesman' => get_post('salesman'), 'area' => get_post('area'),
-            'sales_account' => get_post('sales_account'), 'sales_discount_account' => get_post('sales_discount_account'),
-            'receivables_account' => get_post('receivables_account'),
-            'payment_discount_account' => get_post('payment_discount_account'),
-            'default_location' => get_post('default_location'), 'tax_group_id' => get_post('tax_group_id'),
-            'bank_account' => get_post('bank_account'));
-        foreach ($orders as $o) $import_log[] = medusa_import_order($o, $opts);
-        if (!count($orders) && $error == '') $import_log[] = "No new orders to import.";
+        $opts = array();
+        foreach ($MEDUSA_OPT_KEYS as $k) $opts[$k] = $k == 'credit_limit' ? input_num($k) : get_post($k);
+        // The timer imports with the options of the last manual import.
+        medusa_set('import_opts', json_encode($opts));
+        list($import_log, $import_errors) = medusa_run_import($opts);
         $action = 'oimport';
     }
 }
 
 $push_log = array();
+$push_errors = array();
 if ($action == 'p_push') {
-    // Orders shipped in the shop but not yet in FA would be counted twice as stock.
-    $error = '';
-    $waiting = medusa_orders_to_import(medusa_get('startorder', 0), $error);
-    if ($error != '') display_error($error);
-    elseif (count($waiting)) display_error(count($waiting)." shop order(s) are waiting: run Order Import first.");
-    else {
-        list($rows, $variants, $links, $levels, $error) = medusa_push_plan(medusa_get('location', 'DEF'));
-        if ($error != '') display_error($error);
-        else $push_log = medusa_push_apply($variants, $links, $levels);
-    }
+    list($push_log, $push_errors) = medusa_run_push();
     $action = 'push';
 }
 
@@ -147,7 +151,12 @@ if ($action == 'show') {
 }
 
 if ($action == 'oimport') {
+    foreach ($import_errors as $line) display_error($line);
     foreach ($import_log as $line) display_notification($line);
+    // Start from the options the timer uses (the last manual import).
+    $saved = medusa_import_opts();
+    if ($saved && !isset($_POST['oimport']))
+        foreach ($saved as $k => $v) if (!isset($_POST[$k])) $_POST[$k] = $k == 'credit_limit' ? price_format($v) : $v;
 
     start_form(true);
     start_table(TABLESTYLE2, "width=40%");
@@ -169,14 +178,16 @@ if ($action == 'oimport') {
     global $SysPrefs;
     table_section_title("Location, Tax, Prices, Payments");
     locations_list_row("Location:", 'default_location', null);
-    tax_groups_list_row(_("Tax group outside Florida:"), 'tax_group_id', medusa_get('taxgroup'));
+    if (!isset($_POST['tax_group_id'])) $_POST['tax_group_id'] = medusa_get('taxgroup');
+    tax_groups_list_row(_("Tax group outside Florida:"), 'tax_group_id', null);
     sales_types_list_row("List prices from Sales Type:", 'sales_type', null);
     sales_persons_list_row("Sales Person:", 'salesman', null);
     sales_areas_list_row("Sales Area:", 'area');
     currencies_list_row("Customer Currency:", 'currency', get_company_pref("curr_default"));
     payment_terms_list_row("Payment Terms:", 'payment_terms', null);
     amount_row(_("Credit Limit:"), 'credit_limit', price_format($SysPrefs->default_credit_limit()));
-    bank_accounts_list_row(_("Bank account for payments:"), 'bank_account', medusa_get('bank'));
+    if (!isset($_POST['bank_account'])) $_POST['bank_account'] = medusa_get('bank');
+    bank_accounts_list_row(_("Bank account for payments:"), 'bank_account', null);
     end_table(1);
 
     hidden('action', 'o_import');
@@ -186,6 +197,7 @@ if ($action == 'oimport') {
 }
 
 if ($action == 'push') {
+    foreach ($push_errors as $line) display_error($line);
     foreach ($push_log as $line) display_notification($line);
     $error = '';
     list($rows, $variants, $links, $levels, $error) = medusa_push_plan(medusa_get('location', 'DEF'));

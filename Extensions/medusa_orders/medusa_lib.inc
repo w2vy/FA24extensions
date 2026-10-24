@@ -21,7 +21,14 @@ function medusa_table_exists() {
 
 function medusa_create_table() {
     db_query("CREATE TABLE IF NOT EXISTS ".TB_PREF."medusa ( `name` char(20) NOT NULL default '', " .
-        " `value` varchar(255) NOT NULL default '', PRIMARY KEY (`name`))", "Error creating table");
+        " `value` text NOT NULL, PRIMARY KEY (`name`))", "Error creating table");
+}
+
+/** Tables made before the timer had value varchar(255); the saved import options need more. */
+function medusa_upgrade_table() {
+    $col = db_fetch_assoc(db_query("SHOW COLUMNS FROM ".TB_PREF."medusa LIKE 'value'", "medusa columns"));
+    if ($col && stripos($col['Type'], 'varchar') === 0)
+        db_query("ALTER TABLE ".TB_PREF."medusa MODIFY `value` text NOT NULL", "could not widen the medusa table");
 }
 
 function medusa_get($name, $default = '') {
@@ -63,14 +70,19 @@ function medusa_api($method, $path, $query = array(), $body = null) {
     return medusa_http($method, $url, medusa_get('apikey') . ':', $body);
 }
 
-/** The Stripe fee of a charge, or null when unknown (no key, no charge, API error). */
+/**
+ * The Stripe fee of a charge: [fee, error]. fee null + no error = unknown by
+ * design (no Stripe key set, or no charge id): booked as 0. An error = Stripe
+ * didn't answer: the caller retries later rather than book a wrong fee.
+ */
 function medusa_stripe_fee($charge_id) {
     $key = medusa_get('stripekey');
-    if ($key == '' || $charge_id == '') return null;
+    if ($key == '' || $charge_id == '') return array(null, '');
     list($status, $ch, $err) = medusa_http('GET',
         'https://api.stripe.com/v1/charges/' . urlencode($charge_id) . '?expand[]=balance_transaction', $key . ':');
-    if ($err != '' || !isset($ch['balance_transaction']['fee'])) return null;
-    return $ch['balance_transaction']['fee'] / 100.0;
+    if ($err == '' && !isset($ch['balance_transaction']['fee'])) $err = 'no balance transaction yet';
+    if ($err != '') return array(null, "Stripe fee for $charge_id: $err");
+    return array($ch['balance_transaction']['fee'] / 100.0, '');
 }
 
 // ---- orders -----------------------------------------------------------------
@@ -214,7 +226,7 @@ function medusa_fa_lines($it, $sales_type) {
     return array(array($it['variant_sku'], $qty, $list, 1.0 - $paid / $list));
 }
 
-/** Imports one Medusa order; returns a line of text for the screen. Throws nothing: errors come back as text. */
+/** Imports one Medusa order; returns [ok, a line of text for the screen]. Throws nothing: errors come back as text. */
 function medusa_import_order($o, $opts) {
     global $MEDUSA_REF, $Refs;
     $n = $o['display_id'];
@@ -226,13 +238,25 @@ function medusa_import_order($o, $opts) {
 
     foreach ($o['items'] as $it) {
         if (fa_get_item_code_id_m($it['variant_sku']) === false && empty($it['variant']['metadata']['fa_kit']))
-            return "Order #$n: SKU ".$it['variant_sku']." is not in FA, skipped";
+            return array(false, "Order #$n: SKU ".$it['variant_sku']." is not in FA, skipped");
+    }
+
+    // Stripe fees first: nothing is written unless every fee is known (or unknown by design).
+    $fees = array();
+    foreach ($o['payment_collections'] as $pc) {
+        foreach ((array)$pc['payments'] as $p) {
+            if (empty($p['captured_at']) || !empty($p['canceled_at'])) continue;
+            $charge = isset($p['data']['latest_charge']) ? $p['data']['latest_charge'] : '';
+            list($fee, $err) = medusa_stripe_fee($charge);
+            if ($err != '') return array(false, "Order #$n: $err; skipped, retried next run");
+            $fees[$p['id']] = $fee;
+        }
     }
 
     begin_transaction();
     list($debtor_no, $is_new) = medusa_customer($email, $name, $addr, $taxgid, $opts);
     $branch = medusa_branch($debtor_no, $addr, $taxgid);
-    if (!$branch) { cancel_transaction(); return "Order #$n: customer $debtor_no has no branch, skipped"; }
+    if (!$branch) { cancel_transaction(); return array(false, "Order #$n: customer $debtor_no has no branch, skipped"); }
     $customer = db_fetch_assoc(db_query("SELECT * FROM ".TB_PREF."debtors_master WHERE debtor_no = "
         .db_escape($debtor_no), "debtor"));
 
@@ -262,7 +286,7 @@ function medusa_import_order($o, $opts) {
             if (empty($p['captured_at']) || !empty($p['canceled_at'])) continue;
             $amount = round((float)$p['amount'], 2);
             $charge = isset($p['data']['latest_charge']) ? $p['data']['latest_charge'] : '';
-            $fee = medusa_stripe_fee($charge);
+            $fee = $fees[$p['id']];
             $date = sql2date(substr($p['captured_at'], 0, 10));
             $ref = $Refs->get_next(ST_CUSTPAYMENT, null, array('customer' => $debtor_no,
                 'branch' => $branch['branch_code'], 'date' => $date));
@@ -272,8 +296,34 @@ function medusa_import_order($o, $opts) {
         }
     }
     commit_transaction();
-    return "Order #$n -> FA sales order $order_no for $name" . ($is_new ? ' (new customer)' : '')
-        . (count($pays) ? '; payment ' . implode(', ', $pays) : '; no captured payment');
+    return array(true, "Order #$n -> FA sales order $order_no for $name" . ($is_new ? ' (new customer)' : '')
+        . (count($pays) ? '; payment ' . implode(', ', $pays) : '; no captured payment'));
+}
+
+$MEDUSA_OPT_KEYS = array('currency', 'payment_terms', 'credit_limit', 'sales_type', 'salesman', 'area',
+    'sales_account', 'sales_discount_account', 'receivables_account', 'payment_discount_account',
+    'default_location', 'tax_group_id', 'bank_account');
+
+/** The options of the last manual import (the timer imports with them), or null. */
+function medusa_import_opts() {
+    // db_escape stores the JSON HTML-encoded.
+    $o = json_decode(html_entity_decode(medusa_get('import_opts'), ENT_QUOTES), true);
+    return is_array($o) ? $o : null;
+}
+
+/** Imports every waiting order; returns [lines, errors]. */
+function medusa_run_import($opts) {
+    $lines = array();
+    $errors = array();
+    $error = '';
+    $orders = medusa_orders_to_import(medusa_get('startorder', 0), $error);
+    if ($error != '') $errors[] = $error;
+    foreach ($orders as $o) {
+        list($ok, $text) = medusa_import_order($o, $opts);
+        if ($ok) $lines[] = $text; else $errors[] = $text;
+    }
+    if (!count($orders) && $error == '') $lines[] = "No new orders to import.";
+    return array($lines, $errors);
 }
 
 function fa_get_item_code_id_m($sku) {
