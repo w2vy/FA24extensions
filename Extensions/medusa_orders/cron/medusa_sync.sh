@@ -3,6 +3,8 @@
 # orders, then pushes prices + stock to the shop (medusa.php action=cron).
 # Config ~/.config/medusa-sync.env (mode 600): FA_URL FA_USER FA_PASS MAIL_TO.
 # Mails each error the first time it shows, then once a day while it lasts.
+# A 502/503/504 from the shop (dev backend mid-rebuild) is mailed only when
+# the next run hits it again.
 set -u
 . "$HOME/.config/medusa-sync.env"
 STATE="$HOME/.local/state/medusa-sync"
@@ -30,12 +32,15 @@ now=$(date +%s); new=0; seen=()
 while IFS= read -r e; do
     [ -z "$e" ] && continue
     h=$(printf '%s' "$e" | sha1sum | cut -c1-16); seen+=("$h")
+    if [[ "$e" =~ HTTP\ 50[234] ]] && [ ! -e "$STATE/again-$h" ]; then
+        touch "$STATE/again-$h"; continue
+    fi
     last=$(cat "$STATE/err-$h" 2>/dev/null || echo 0)
     if [ $((now - last)) -ge 86400 ]; then new=1; echo "$now" > "$STATE/err-$h"; fi
 done <<< "$errors"
-for f in "$STATE"/err-*; do
+for f in "$STATE"/err-* "$STATE"/again-*; do
     [ -e "$f" ] || continue
-    h=${f##*/err-}; [[ " ${seen[*]:-} " == *" $h "* ]] || rm -f "$f"
+    h=${f##*/err-}; h=${h##*/again-}; [[ " ${seen[*]:-} " == *" $h "* ]] || rm -f "$f"
 done
 if [ "$new" = 1 ]; then
     {
