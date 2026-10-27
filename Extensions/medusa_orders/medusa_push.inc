@@ -22,7 +22,7 @@ $MEDUSA_POOLS = array();
 foreach (array('SIC60', 'SIC80', 'SIC120', 'SIC220', 'SIC320', 'SIC500', 'WAO5', 'WAO9', 'WAO12',
     'WAO15', 'WAO25', 'CEO', 'ROUGE-RED') as $p) $MEDUSA_POOLS[$p] = 16;     // lb -> oz
 foreach (array('H55', 'H64', 'H73', 'H82') as $p) $MEDUSA_POOLS[$p] = 2;    // kg -> half kg
-foreach (array('PADS', 'PLATE-6', 'PLATE-8', 'PLATE-10', 'PLATE-12',
+foreach (array('PADS', 'PLATE-6', 'PLATE-8', 'PLATE-10', 'PLATE-12', 'PLATE-10-1', 'PLATE-12-1',
     'HA00', 'HA09', 'HA18', 'HA30', 'HA39', 'HA60', 'HA63', 'HA78') as $p) $MEDUSA_POOLS[$p] = 1;
 
 $MEDUSA_RETAIL = 1;   // FA sales type the shop sells at
