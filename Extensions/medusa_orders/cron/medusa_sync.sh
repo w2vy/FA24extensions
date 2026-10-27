@@ -20,7 +20,9 @@ errors=$(printf '%s\n' "$out" | grep '^ERROR: ' | sed 's/^ERROR: //')
 if ! printf '%s\n' "$out" | grep -qx 'DONE'; then
     errors+=$'\n'"run did not finish (curl exit $rc): $(printf '%s' "$out" | sed 's/<[^>]*>//g' | tail -c 400 | tr '\n' ' ')"
 fi
-errors=$(printf '%s\n' "$errors" | sed '/^$/d')
+# Import and push often hit the same error: one line each, or a single shop
+# 502 would count as "seen twice" below.
+errors=$(printf '%s\n' "$errors" | sed '/^$/d' | awk '!seen[$0]++')
 
 # Log: one line when nothing happened, else the interesting lines.
 busy=$(printf '%s\n' "$out" | grep -v -x -E 'DONE|No new orders to import\.|0 variant\(s\) updated|Stock links changed on 0 product\(s\)|Stock levels unchanged')
