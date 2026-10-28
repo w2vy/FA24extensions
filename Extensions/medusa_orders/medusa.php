@@ -20,6 +20,8 @@ include_once($path_to_root . "/sales/includes/db/payment_db.inc");
 include_once($path_to_root . "/sales/includes/cart_class.inc");
 include_once($path_to_root . "/sales/includes/ui/sales_order_ui.inc");
 include_once($path_to_root . "/inventory/includes/db/items_prices_db.inc");
+include_once($path_to_root . "/gl/includes/gl_db.inc");
+include_once($path_to_root . "/includes/ui/items_cart.inc");
 include_once($path_to_root . "/modules/medusa_orders/medusa_lib.inc");
 include_once($path_to_root . "/modules/medusa_orders/medusa_push.inc");
 

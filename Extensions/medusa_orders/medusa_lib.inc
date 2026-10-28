@@ -103,8 +103,20 @@ $MEDUSA_ORDER_FIELDS = 'id,display_id,email,created_at,currency_code,status,paym
     . 'payment_collections.payments.id,payment_collections.payments.amount,payment_collections.payments.data,'
     . 'payment_collections.payments.captured_at,payment_collections.payments.canceled_at';
 
-/** Paid (captured, or since refunded) AND fulfilled (label bought) or shipped/delivered. */
+/** Paid, then refunded in full before it shipped: only Stripe's kept fee goes into FA. */
+function medusa_order_refunded_unshipped($o) {
+    return empty($o['metadata']['migrated_from']) && $o['payment_status'] == 'refunded'
+        && in_array($o['fulfillment_status'], array('not_fulfilled', 'canceled'));
+}
+
+function medusa_fee_memo($n) {
+    return "Canceled Order # $n processing fee";
+}
+
+/** Paid (captured, or since refunded) AND fulfilled (label bought) or shipped/delivered;
+ * or refunded in full before shipping (fee only). */
 function medusa_order_ready($o) {
+    if (medusa_order_refunded_unshipped($o)) return true;
     // Old Woo orders loaded into the shop (phase 4) are in FA already, by woo_orders,
     // except the ones marked fa_import (shipped after the last woo_orders run).
     if (!empty($o['metadata']['migrated_from']) && empty($o['metadata']['fa_import'])) return false;
@@ -124,8 +136,12 @@ function medusa_orders_to_import($cursor, &$error) {
         if ($err != '') { $error = "Medusa: $err"; return $out; }
         foreach ($page['orders'] as $o) {
             if (((int)$o['display_id'] <= (int)$cursor && empty($o['metadata']['fa_import'])) || !medusa_order_ready($o)) continue;
-            $res = db_query("SELECT order_no FROM ".TB_PREF."sales_orders WHERE trans_type = ".ST_SALESORDER
-                ." AND customer_ref = ".db_escape(medusa_ref($o).$o['display_id']), "could not look for the order");
+            if (medusa_order_refunded_unshipped($o))
+                $res = db_query("SELECT id FROM ".TB_PREF."comments WHERE type = ".ST_BANKPAYMENT
+                    ." AND memo_ = ".db_escape(medusa_fee_memo($o['display_id'])), "could not look for the fee");
+            else
+                $res = db_query("SELECT order_no FROM ".TB_PREF."sales_orders WHERE trans_type = ".ST_SALESORDER
+                    ." AND customer_ref = ".db_escape(medusa_ref($o).$o['display_id']), "could not look for the order");
             if (db_num_rows($res) > 0) continue;
             $out[] = $o;
         }
@@ -244,6 +260,7 @@ function medusa_import_order($o, $opts) {
     $n = $o['display_id'];
     $REF = medusa_ref($o);
     $meta = is_array($o['metadata']) ? $o['metadata'] : array();
+    if (medusa_order_refunded_unshipped($o)) return medusa_import_refunded_fee($o, $opts);
     $a = !empty($o['shipping_address']['address_1']) ? $o['shipping_address'] : $o['billing_address'];
     $email = $o['email'];
     $name = trim($a['first_name'] . ' ' . $a['last_name']);
@@ -327,6 +344,31 @@ function medusa_import_order($o, $opts) {
     commit_transaction();
     return array(true, "Order #$n -> FA sales order $order_no for $name" . ($is_new ? ' (new customer)' : '')
         . (count($pays) ? '; payment ' . implode(', ', $pays) : '; no captured payment'));
+}
+
+/** A refunded, unshipped order: one FA bank payment of the kept Stripe fee(s) to the bank charge account. */
+function medusa_import_refunded_fee($o, $opts) {
+    global $Refs;
+    $n = $o['display_id'];
+    $total = 0;
+    $date = null;
+    foreach ($o['payment_collections'] as $pc) {
+        foreach ((array)$pc['payments'] as $p) {
+            if (empty($p['captured_at'])) continue;
+            $charge = isset($p['data']['latest_charge']) ? $p['data']['latest_charge'] : '';
+            list($fee, $err) = medusa_stripe_fee($charge);
+            if ($err != '') return array(false, "Order #$n: $err; skipped, retried next run");
+            $total += (float)$fee;
+            if ($date === null) $date = sql2date(substr($p['captured_at'], 0, 10));
+        }
+    }
+    if ($total <= 0) return array(false, "Order #$n: refunded, but no Stripe fee found; book it by hand");
+    $memo = medusa_fee_memo($n);
+    $cart = new items_cart(ST_BANKPAYMENT);
+    $cart->add_gl_item(get_company_pref('bank_charge_act'), 0, 0, round($total, 2), $memo);
+    $ref = $Refs->get_next(ST_BANKPAYMENT, null, $date);
+    write_bank_transaction(ST_BANKPAYMENT, 0, $opts['bank_account'], $cart, $date, PT_MISC, 'Stripe', 0, $ref, $memo, true, null);
+    return array(true, "Order #$n refunded before shipping -> FA bank payment, Stripe fee $".number_format($total, 2));
 }
 
 $MEDUSA_OPT_KEYS = array('currency', 'payment_terms', 'credit_limit', 'sales_type', 'salesman', 'area',
