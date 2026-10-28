@@ -65,6 +65,8 @@ function medusa_http($method, $url, $userpwd, $body = null) {
 }
 
 function medusa_api($method, $path, $query = array(), $body = null) {
+    // A blank login can hang at the shop's gateway for a minute; don't send one.
+    if (medusa_get('apikey') == '') return array(0, null, 'no API key set (Configuration)');
     $url = rtrim(medusa_get('url'), '/') . $path;
     if (count($query)) $url .= '?' . http_build_query($query);
     return medusa_http($method, $url, medusa_get('apikey') . ':', $body);
