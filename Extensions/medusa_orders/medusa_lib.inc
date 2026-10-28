@@ -11,6 +11,13 @@ customer payment with the Stripe fee as bank charge.
 ***********************************************/
 
 $MEDUSA_REF = 'Medusa Order # ';
+$MEDUSA_WOO_REF = 'Woo Order # ';   // as woo_orders wrote it
+
+/** FA cust_ref prefix: old Woo orders keep the old woo_orders ref. */
+function medusa_ref($o) {
+    global $MEDUSA_REF, $MEDUSA_WOO_REF;
+    return empty($o['metadata']['migrated_from']) ? $MEDUSA_REF : $MEDUSA_WOO_REF;
+}
 
 // ---- settings (table <pref>medusa: name/value) ------------------------------
 
@@ -98,8 +105,9 @@ $MEDUSA_ORDER_FIELDS = 'id,display_id,email,created_at,currency_code,status,paym
 
 /** Paid (captured, or since refunded) AND fulfilled (label bought) or shipped/delivered. */
 function medusa_order_ready($o) {
-    // Old Woo orders loaded into the shop (phase 4) are in FA already, by woo_orders.
-    if (!empty($o['metadata']['migrated_from'])) return false;
+    // Old Woo orders loaded into the shop (phase 4) are in FA already, by woo_orders,
+    // except the ones marked fa_import (shipped after the last woo_orders run).
+    if (!empty($o['metadata']['migrated_from']) && empty($o['metadata']['fa_import'])) return false;
     return $o['status'] != 'canceled'
         && in_array($o['payment_status'], array('captured', 'partially_refunded', 'refunded'))
         && in_array($o['fulfillment_status'], array('fulfilled', 'shipped', 'delivered'));
@@ -107,7 +115,7 @@ function medusa_order_ready($o) {
 
 /** Orders after the cursor that are ready and not yet in FA, oldest first. */
 function medusa_orders_to_import($cursor, &$error) {
-    global $MEDUSA_ORDER_FIELDS, $MEDUSA_REF;
+    global $MEDUSA_ORDER_FIELDS;
     $out = array();
     $offset = 0;
     do {
@@ -115,9 +123,9 @@ function medusa_orders_to_import($cursor, &$error) {
             'order' => 'display_id', 'limit' => 50, 'offset' => $offset, 'fields' => $MEDUSA_ORDER_FIELDS));
         if ($err != '') { $error = "Medusa: $err"; return $out; }
         foreach ($page['orders'] as $o) {
-            if ((int)$o['display_id'] <= (int)$cursor || !medusa_order_ready($o)) continue;
+            if (((int)$o['display_id'] <= (int)$cursor && empty($o['metadata']['fa_import'])) || !medusa_order_ready($o)) continue;
             $res = db_query("SELECT order_no FROM ".TB_PREF."sales_orders WHERE trans_type = ".ST_SALESORDER
-                ." AND customer_ref = ".db_escape($MEDUSA_REF.$o['display_id']), "could not look for the order");
+                ." AND customer_ref = ".db_escape(medusa_ref($o).$o['display_id']), "could not look for the order");
             if (db_num_rows($res) > 0) continue;
             $out[] = $o;
         }
@@ -232,8 +240,10 @@ function medusa_fa_lines($it, $sales_type) {
 
 /** Imports one Medusa order; returns [ok, a line of text for the screen]. Throws nothing: errors come back as text. */
 function medusa_import_order($o, $opts) {
-    global $MEDUSA_REF, $Refs;
+    global $Refs;
     $n = $o['display_id'];
+    $REF = medusa_ref($o);
+    $meta = is_array($o['metadata']) ? $o['metadata'] : array();
     $a = !empty($o['shipping_address']['address_1']) ? $o['shipping_address'] : $o['billing_address'];
     $email = $o['email'];
     $name = trim($a['first_name'] . ' ' . $a['last_name']);
@@ -267,7 +277,7 @@ function medusa_import_order($o, $opts) {
     $order_date = sql2date(substr($o['created_at'], 0, 10));
     $cart = new Cart(ST_SALESORDER);
     $cart->set_customer($debtor_no, $customer['name'], $customer['curr_code'], 0, $customer['payment_terms']);
-    $cart->cust_ref = $MEDUSA_REF . $n;
+    $cart->cust_ref = $REF . $n;
     $cart->Comments = '';
     $cart->document_date = $order_date;
     $cart->due_date = $order_date;
@@ -295,9 +305,20 @@ function medusa_import_order($o, $opts) {
             $ref = $Refs->get_next(ST_CUSTPAYMENT, null, array('customer' => $debtor_no,
                 'branch' => $branch['branch_code'], 'date' => $date));
             write_customer_payment(0, $debtor_no, $branch['branch_code'], $opts['bank_account'], $date, $ref,
-                $amount, 0, $MEDUSA_REF . "$n Stripe $charge", 0, $fee === null ? 0 : $fee);
+                $amount, 0, $REF . "$n Stripe $charge", 0, $fee === null ? 0 : $fee);
             $pays[] = '$'.number_format($amount, 2) . ($fee === null ? ' (fee unknown)' : ' fee $'.number_format($fee, 2));
         }
+    }
+    // An old Woo order paid by WooPayments: the order total, fee from the Woo order (fa_import metadata).
+    if (!empty($meta['fa_import']) && !empty($meta['woo_charge'])) {
+        $amount = round((float)$o['total'], 2);
+        $fee = (float)$meta['woo_fee'];
+        $date = sql2date(substr(!empty($meta['woo_paid']) ? $meta['woo_paid'] : $o['created_at'], 0, 10));
+        $ref = $Refs->get_next(ST_CUSTPAYMENT, null, array('customer' => $debtor_no,
+            'branch' => $branch['branch_code'], 'date' => $date));
+        write_customer_payment(0, $debtor_no, $branch['branch_code'], $opts['bank_account'], $date, $ref,
+            $amount, 0, $REF . "$n WooPayments ".$meta['woo_charge'], 0, $fee);
+        $pays[] = '$'.number_format($amount, 2) . ' fee $'.number_format($fee, 2);
     }
     commit_transaction();
     return array(true, "Order #$n -> FA sales order $order_no for $name" . ($is_new ? ' (new customer)' : '')
