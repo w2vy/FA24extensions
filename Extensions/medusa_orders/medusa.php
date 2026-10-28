@@ -24,6 +24,7 @@ include_once($path_to_root . "/gl/includes/gl_db.inc");
 include_once($path_to_root . "/includes/ui/items_cart.inc");
 include_once($path_to_root . "/modules/medusa_orders/medusa_lib.inc");
 include_once($path_to_root . "/modules/medusa_orders/medusa_push.inc");
+include_once($path_to_root . "/modules/medusa_orders/medusa_dispatch.inc");
 
 check_db_has_sales_areas("You must first define atleast one Sales Area");
 
@@ -33,7 +34,7 @@ if (isset($_POST['action'])) $action = $_POST['action'];
 if (!$found && $action != 'create') $action = 'show';
 if ($found) medusa_upgrade_table();
 
-$SETTINGS = array('url', 'apikey', 'stripekey', 'startorder', 'taxgroup', 'bank', 'location');
+$SETTINGS = array('url', 'apikey', 'stripekey', 'startorder', 'taxgroup', 'bank', 'location', 'dispatchfrom');
 
 if ($action == 'create') {
     medusa_create_table();
@@ -51,7 +52,10 @@ if ($action == 'update') {
     $action = 'show';
 }
 
-// The timer (w2vy cron, medusa_sync.sh): import, then push, as plain text.
+// The timer (w2vy cron, medusa_sync.sh): import, push, then dispatch, as plain text.
+// Dispatch last: it moves stock within the pools and off undelivered orders by the
+// same amount, so the push sends the same numbers either way, and a dispatch that
+// dies mid-run can't hold the push back.
 // "ERROR: " lines are mailed; "DONE" last means the run finished.
 if ($action == 'cron') {
     header('Content-Type: text/plain; charset=utf-8');
@@ -63,6 +67,9 @@ if ($action == 'cron') {
         foreach ($lines as $l) echo "$l\n";
         foreach ($errors as $e) echo "ERROR: $e\n";
         list($lines, $errors) = medusa_run_push();
+        foreach ($lines as $l) echo "$l\n";
+        foreach ($errors as $e) echo "ERROR: $e\n";
+        list($lines, $errors) = medusa_run_dispatch();
         foreach ($lines as $l) echo "$l\n";
         foreach ($errors as $e) echo "ERROR: $e\n";
     }
@@ -93,9 +100,16 @@ if ($action == 'p_push') {
     $action = 'push';
 }
 
+$dispatch_log = array();
+$dispatch_errors = array();
+if ($action == 'd_dispatch') {
+    list($dispatch_log, $dispatch_errors) = medusa_run_dispatch();
+    $action = 'dispatch';
+}
+
 page("Medusa Shop Interface");
 $tabs = array('summary' => 'Summary', 'show' => 'Configuration', 'oimport' => 'Order Import',
-    'push' => 'Price + Stock Push');
+    'push' => 'Price + Stock Push', 'dispatch' => 'Dispatch');
 $sep = '';
 foreach ($tabs as $a => $label) {
     echo $sep;
@@ -139,6 +153,7 @@ if ($action == 'show') {
         tax_groups_list_row(_("Tax group outside Florida:"), 'taxgroup', medusa_get('taxgroup'));
         bank_accounts_list_row(_("Bank account for payments:"), 'bank', medusa_get('bank'));
         locations_list_row(_("Shop stock location:"), 'location', medusa_get('location', 'DEF'));
+        text_row("Auto-dispatch from sales order # (blank = off)", 'dispatchfrom', medusa_get('dispatchfrom'), 10, 20);
     }
     end_table(1);
     if (!$found) {
@@ -219,5 +234,39 @@ if ($action == 'push') {
     hidden('action', 'p_push');
     submit_center('p_push', "Push to Shop");
     end_form();
+    end_page();
+}
+
+if ($action == 'dispatch') {
+    foreach ($dispatch_errors as $line) display_error($line);
+    foreach ($dispatch_log as $line) display_notification($line);
+    $from = medusa_dispatch_from();
+    if (!$from) display_note("Auto-dispatch is off: set \"Auto-dispatch from sales order #\" under Configuration.", 0, 1);
+    else display_note("Imported orders from sales order $from on, not yet delivered, oldest first. The timer dispatches them every run.", 0, 1);
+    start_table(TABLESTYLE);
+    table_header(array("Sales order", "Date", "Shop order", "Will make", "Short (held)"));
+    $k = 0;
+    $avail = array();
+    $orders = $from ? medusa_orders_to_dispatch($from) : array();
+    foreach ($orders as $so) {
+        list($wos, $short) = medusa_dispatch_plan($so, $avail);
+        $make = array();
+        foreach ($wos as $w) $make[$w[0]] = (isset($make[$w[0]]) ? $make[$w[0]] : 0) + $w[1];
+        alt_table_row_color($k);
+        label_cell(get_trans_view_str(ST_SALESORDER, $so['order_no']));
+        label_cell(sql2date($so['ord_date']));
+        label_cell($so['customer_ref']);
+        label_cell(medusa_qty_text($make));
+        label_cell(count($short) ? "<font color=red>".medusa_qty_text($short)."</font>" : '');
+        end_row();
+    }
+    if ($from && !count($orders)) label_row("", "Nothing waiting.", "colspan=4");
+    end_table(1);
+    if ($from && count($orders)) {
+        start_form(true);
+        hidden('action', 'd_dispatch');
+        submit_center('d_dispatch', "Dispatch Now");
+        end_form();
+    }
     end_page();
 }
