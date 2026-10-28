@@ -309,16 +309,20 @@ function medusa_import_order($o, $opts) {
             $pays[] = '$'.number_format($amount, 2) . ($fee === null ? ' (fee unknown)' : ' fee $'.number_format($fee, 2));
         }
     }
-    // An old Woo order paid by WooPayments: the order total, fee from the Woo order (fa_import metadata).
-    if (!empty($meta['fa_import']) && !empty($meta['woo_charge'])) {
-        $amount = round((float)$o['total'], 2);
+    // An old Woo order's payment (fa_import metadata): WooPayments = the order total + charge id;
+    // paid another way (PayPal) = woo_amount into bank account woo_bank. Fee from the Woo order / PayPal.
+    if (!empty($meta['fa_import']) && (!empty($meta['woo_charge']) || !empty($meta['woo_amount']))) {
+        $amount = round((float)(!empty($meta['woo_amount']) ? $meta['woo_amount'] : $o['total']), 2);
         $fee = (float)$meta['woo_fee'];
+        $bank = !empty($meta['woo_bank']) ? $meta['woo_bank'] : $opts['bank_account'];
+        $via = trim((!empty($meta['woo_via']) ? $meta['woo_via'] : 'WooPayments')
+            . ' ' . (isset($meta['woo_charge']) ? $meta['woo_charge'] : ''));
         $date = sql2date(substr(!empty($meta['woo_paid']) ? $meta['woo_paid'] : $o['created_at'], 0, 10));
         $ref = $Refs->get_next(ST_CUSTPAYMENT, null, array('customer' => $debtor_no,
             'branch' => $branch['branch_code'], 'date' => $date));
-        write_customer_payment(0, $debtor_no, $branch['branch_code'], $opts['bank_account'], $date, $ref,
-            $amount, 0, $REF . "$n WooPayments ".$meta['woo_charge'], 0, $fee);
-        $pays[] = '$'.number_format($amount, 2) . ' fee $'.number_format($fee, 2);
+        write_customer_payment(0, $debtor_no, $branch['branch_code'], $bank, $date, $ref,
+            $amount, 0, $REF . "$n $via", 0, $fee);
+        $pays[] = '$'.number_format($amount, 2) . ' fee $'.number_format($fee, 2) . " ($via)";
     }
     commit_transaction();
     return array(true, "Order #$n -> FA sales order $order_no for $name" . ($is_new ? ' (new customer)' : '')
