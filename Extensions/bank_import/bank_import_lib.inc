@@ -149,19 +149,29 @@ function bi_match_one($bank, $line, $taken) {
     return $all;
 }
 
-/** A payout: unreconciled customer payments of the last 10 days that add up to it. */
+/**
+ * A payout: unreconciled customer payments of the last 10 days that add up to it,
+ * less any processing fees kept in that time (a bank payment whose only other GL
+ * line is the bank charges account, e.g. a refunded duplicate charge's fee).
+ */
 function bi_match_payout($bank, $line, $taken) {
     $p = db_escape($line['posted']);
-    $sql = bi_free_bank_trans_sql($bank, $taken)." AND b.type = ".ST_CUSTPAYMENT." AND b.amount > 0"
+    $fee_act = db_escape(get_company_pref('bank_charge_act'));
+    $bank_gl = db_escape(get_bank_gl_account($bank));
+    $sql = bi_free_bank_trans_sql($bank, $taken)
+        ." AND ((b.type = ".ST_CUSTPAYMENT." AND b.amount > 0) OR (b.type = ".ST_BANKPAYMENT." AND b.amount < 0"
+        ." AND NOT EXISTS (SELECT 1 FROM ".TB_PREF."gl_trans g WHERE g.type = b.type AND g.type_no = b.trans_no"
+        ." AND g.amount != 0 AND g.account NOT IN ($fee_act, $bank_gl))))"
         ." AND b.trans_date BETWEEN DATE_SUB($p, INTERVAL 10 DAY) AND $p ORDER BY b.trans_date DESC, b.id DESC LIMIT 20";
     $res = db_query($sql, "could not look for payout payments");
     $cand = array();
     while ($r = db_fetch_assoc($res)) $cand[] = $r;
     $want = (int)round($line['amount'] * 100);
     $pick = array();
+    // Fees are negative, so a partial sum may pass the target and come back: no pruning on the sign.
     $find = function ($i, $left) use (&$find, &$pick, $cand) {
-        if ($left == 0) return count($pick) > 0;
-        if ($left < 0 || $i >= count($cand)) return false;
+        if ($left == 0 && count($pick) > 0) return true;
+        if ($i >= count($cand)) return false;
         $c = (int)round($cand[$i]['amount'] * 100);
         $pick[] = $cand[$i];
         if ($find($i + 1, $left - $c)) return true;
