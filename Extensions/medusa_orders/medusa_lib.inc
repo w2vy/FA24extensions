@@ -49,6 +49,20 @@ function medusa_set($name, $value) {
         "could not write setting");
 }
 
+/**
+ * Sealed cartons that open into a bulk item (setting "cartons", one per line:
+ * "AA509 = WAO9 * 44"): [carton => [bulk, bulk qty per carton]]. Dispatch opens
+ * one when the bulk runs short; the push counts them into the bulk pool.
+ */
+function medusa_cartons() {
+    $out = array();
+    foreach (preg_split('/[\r\n]+/', medusa_get('cartons')) as $l) {
+        if (preg_match('/^\s*(\S+)\s*=\s*(\S+)\s*\*\s*([0-9.]+)\s*$/', $l, $m) && (float)$m[3] > 0)
+            $out[$m[1]] = array($m[2], (float)$m[3]);
+    }
+    return $out;
+}
+
 // ---- HTTP -------------------------------------------------------------------
 
 /** GET/POST JSON; returns [http status, decoded body or null, error text]. */

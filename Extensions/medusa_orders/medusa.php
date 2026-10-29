@@ -34,7 +34,7 @@ if (isset($_POST['action'])) $action = $_POST['action'];
 if (!$found && $action != 'create') $action = 'show';
 if ($found) medusa_upgrade_table();
 
-$SETTINGS = array('url', 'fallback_url', 'apikey', 'stripekey', 'startorder', 'taxgroup', 'bank', 'location', 'dispatchfrom');
+$SETTINGS = array('url', 'fallback_url', 'apikey', 'stripekey', 'startorder', 'taxgroup', 'bank', 'location', 'dispatchfrom', 'cartons');
 
 if ($action == 'create') {
     medusa_create_table();
@@ -157,6 +157,7 @@ if ($action == 'show') {
         bank_accounts_list_row(_("Bank account for payments:"), 'bank', medusa_get('bank'));
         locations_list_row(_("Shop stock location:"), 'location', medusa_get('location', 'DEF'));
         text_row("Auto-dispatch from sales order # (blank = off)", 'dispatchfrom', medusa_get('dispatchfrom'), 10, 20);
+        textarea_row("Sealed cartons that open into bulk<br>(one per line: AA509 = WAO9 * 44)", 'cartons', medusa_get('cartons'), 30, 6);
     }
     end_table(1);
     if (!$found) {
@@ -247,18 +248,19 @@ if ($action == 'dispatch') {
     if (!$from) display_note("Auto-dispatch is off: set \"Auto-dispatch from sales order #\" under Configuration.", 0, 1);
     else display_note("Imported orders from sales order $from on, not yet delivered, oldest first. The timer dispatches them every run.", 0, 1);
     start_table(TABLESTYLE);
-    table_header(array("Sales order", "Date", "Shop order", "Will make", "Short (held)"));
+    table_header(array("Sales order", "Date", "Shop order", "Will open", "Will make", "Short (held)"));
     $k = 0;
     $avail = array();
     $orders = $from ? medusa_orders_to_dispatch($from) : array();
     foreach ($orders as $so) {
-        list($wos, $short) = medusa_dispatch_plan($so, $avail);
+        list($wos, $short, $opens) = medusa_dispatch_plan($so, $avail);
         $make = array();
         foreach ($wos as $w) $make[$w[0]] = (isset($make[$w[0]]) ? $make[$w[0]] : 0) + $w[1];
         alt_table_row_color($k);
         label_cell(get_trans_view_str(ST_SALESORDER, $so['order_no']));
         label_cell(sql2date($so['ord_date']));
         label_cell($so['customer_ref']);
+        label_cell(count($short) ? '' : medusa_opens_text($opens));
         label_cell(medusa_qty_text($make));
         label_cell(count($short) ? "<font color=red>".medusa_qty_text($short)."</font>" : '');
         end_row();

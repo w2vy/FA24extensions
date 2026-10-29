@@ -8,8 +8,11 @@ The import takes only paid AND shipped orders, so FA just catches up. Per
 order, oldest first, all or nothing: what is not on hand is made through the
 BOMs (nested: kit -> jars -> bulk + jar, deepest first, as assembly work
 orders), then the whole order is delivered (today), invoiced dated the order
-date, and the order's payment(s) allocated to the invoice. Short anywhere in
-the tree = the order is held (nothing posted) and retried next run.
+date, and the order's payment(s) allocated to the invoice. A bulk item that
+runs short is refilled by opening sealed cartons of it (setting "cartons":
+an inventory adjustment −N carton / +N × qty bulk at the carton's cost).
+Short anywhere in the tree = the order is held (nothing posted) and retried
+next run.
 
 Only imported orders (cust_ref "Medusa Order # N" / "Woo Order # N") from the
 "dispatch from" sales order on; blank = off.
@@ -19,6 +22,7 @@ include_once($path_to_root . "/sales/includes/sales_db.inc");
 include_once($path_to_root . "/sales/includes/db/custalloc_db.inc");
 include_once($path_to_root . "/manufacturing/includes/manufacturing_db.inc");
 include_once($path_to_root . "/admin/db/fiscalyears_db.inc");
+include_once($path_to_root . "/inventory/includes/inventory_db.inc");
 
 /** First sales order number to dispatch; 0 = off. */
 function medusa_dispatch_from() {
@@ -68,16 +72,46 @@ function medusa_qoh($sku, $loc) {
     return round((float)$row[0], 6);
 }
 
+/** Undelivered qty of $sku on all open sales orders (imported or not) at $loc. */
+function medusa_undelivered($sku, $loc) {
+    $row = db_fetch_row(db_query("SELECT SUM(d.quantity - d.qty_sent) FROM ".TB_PREF."sales_order_details d"
+        ." JOIN ".TB_PREF."sales_orders o ON o.order_no = d.order_no AND o.trans_type = d.trans_type"
+        ." WHERE d.trans_type = ".ST_SALESORDER." AND d.quantity > d.qty_sent AND d.stk_code = ".db_escape($sku)
+        ." AND o.from_stk_loc = ".db_escape($loc), "undelivered"));
+    return round((float)$row[0], 6);
+}
+
+/** Simulated stock of $sku at $loc, read from FA the first time. */
+function medusa_avail_init(&$avail, $sku, $loc) {
+    $k = "$loc|$sku";
+    if (!isset($avail[$k])) $avail[$k] = medusa_mb_flag($sku) === null ? 0.0 : max(0.0, medusa_qoh($sku, $loc));
+    return $k;
+}
+
 /**
- * Takes $qty of $sku at $loc from the simulated stock $avail; the rest is made
- * through the BOM. Work orders go to $wos deepest first; what can't be had or
- * made goes to $short.
+ * Takes $qty of $sku at $loc from the simulated stock $avail; a short bulk item
+ * is refilled from sealed cartons ($opens: [carton, n, bulk, bulk qty, loc]);
+ * the rest is made through the BOM. Work orders go to $wos deepest first; what
+ * can't be had or made goes to $short.
  */
-function medusa_need($sku, $qty, $loc, &$avail, &$wos, &$short, $depth = 0) {
+function medusa_need($sku, $qty, $loc, &$avail, &$wos, &$short, &$opens, $depth = 0) {
     $flag = medusa_mb_flag($sku);
     if ($flag == 'D') return;   // service item: no stock
-    $k = "$loc|$sku";
-    if (!isset($avail[$k])) $avail[$k] = $flag === null ? 0.0 : max(0.0, medusa_qoh($sku, $loc));
+    $k = medusa_avail_init($avail, $sku, $loc);
+    if ($avail[$k] < $qty)
+        foreach (medusa_cartons() as $carton => $c) {
+            if ($c[0] != $sku || $avail[$k] >= $qty) continue;
+            $ck = medusa_avail_init($avail, $carton, $loc);
+            // Never open a box an order is waiting for (as a box): on hand less every undelivered box.
+            $ok = "$ck|open";
+            if (!isset($avail[$ok])) $avail[$ok] = max(0.0, $avail[$ck] - medusa_undelivered($carton, $loc));
+            $n = min(floor(min($avail[$ok], $avail[$ck]) + 0.000001), ceil(round(($qty - $avail[$k]) / $c[1], 6)));
+            if ($n < 1) continue;
+            $avail[$ck] = round($avail[$ck] - $n, 6);
+            $avail[$ok] = round($avail[$ok] - $n, 6);
+            $avail[$k] = round($avail[$k] + $n * $c[1], 6);
+            $opens[] = array($carton, $n, $sku, $n * $c[1], $loc);
+        }
     $take = min($avail[$k], $qty);
     $avail[$k] = round($avail[$k] - $take, 6);
     $rest = round($qty - $take, 6);
@@ -87,20 +121,21 @@ function medusa_need($sku, $qty, $loc, &$avail, &$wos, &$short, $depth = 0) {
         $short[$sku] = (isset($short[$sku]) ? $short[$sku] : 0) + $rest;
         return;
     }
-    foreach ($bom as $c) medusa_need($c[0], $rest * $c[1], $c[2], $avail, $wos, $short, $depth + 1);
+    foreach ($bom as $c) medusa_need($c[0], $rest * $c[1], $c[2], $avail, $wos, $short, $opens, $depth + 1);
     $wos[] = array($sku, $rest, $loc);
 }
 
-/** What one order needs: [work orders, shortages]. $avail is updated only when nothing is short. */
+/** What one order needs: [work orders, shortages, cartons to open]. $avail is updated only when nothing is short. */
 function medusa_dispatch_plan($so, &$avail) {
     $try = $avail;
     $wos = array();
     $short = array();
+    $opens = array();
     $res = db_query("SELECT stk_code, quantity - qty_sent q FROM ".TB_PREF."sales_order_details WHERE order_no = "
         .(int)$so['order_no']." AND trans_type = ".ST_SALESORDER." AND quantity > qty_sent ORDER BY id", "order lines");
-    while ($r = db_fetch_assoc($res)) medusa_need($r['stk_code'], (float)$r['q'], $so['from_stk_loc'], $try, $wos, $short);
+    while ($r = db_fetch_assoc($res)) medusa_need($r['stk_code'], (float)$r['q'], $so['from_stk_loc'], $try, $wos, $short, $opens);
     if (!count($short)) $avail = $try;
-    return array($wos, $short);
+    return array($wos, $short, $opens);
 }
 
 function medusa_qty_text($list) {
@@ -113,11 +148,18 @@ function medusa_date_open($date) {
     return !is_date_closed($date) && is_date_in_fiscalyears($date, false);
 }
 
+/** "1 AA509 -> 44 WAO9, ..." */
+function medusa_opens_text($opens) {
+    $t = array();
+    foreach ($opens as $o) $t[] = round($o[1], 4).' '.$o[0].' -> '.round($o[3], 4).' '.$o[2];
+    return implode(', ', $t);
+}
+
 /**
- * Posts one order in one transaction: work orders, delivery, invoice,
- * allocation. Returns [ok, text, warning or ''].
+ * Posts one order in one transaction: cartons opened, work orders, delivery,
+ * invoice, allocation. Returns [ok, text, warning or ''].
  */
-function medusa_dispatch_order($so, $wos) {
+function medusa_dispatch_order($so, $wos, $opens = array()) {
     global $Refs;
     $ref = $so['customer_ref'];
     $today = Today();
@@ -127,6 +169,14 @@ function medusa_dispatch_order($so, $wos) {
     $who = array('customer' => $so['debtor_no'], 'branch' => $so['branch_code']);
 
     begin_transaction();
+    // Open cartons: the bulk takes over the carton's value exactly.
+    foreach ($opens as $o) {
+        list($carton, $n, $bulk, $bqty, $loc) = $o;
+        $cost = get_unit_cost($carton);
+        $items = array(new line_item($carton, -$n, $cost, ''), new line_item($bulk, $bqty, round($cost * $n / $bqty, 6), ''));
+        add_stock_adjustment($items, $loc, $today, $Refs->get_next(ST_INVADJUST, null, $today),
+            "Auto-dispatch $ref: opened $n $carton into $bqty $bulk");
+    }
     $made = array();
     foreach ($wos as $w) {
         add_work_order($Refs->get_next(ST_WORKORDER, null, $today), $w[2], $w[1], $w[0], WO_ASSEMBLY,
@@ -171,7 +221,8 @@ function medusa_dispatch_order($so, $wos) {
         .($paid < $total ? "invoice \$".number_format($total - $paid, 2)." left open"
             : "payment \$".number_format($paid - $total, 2)." left unallocated");
     return array(true, "$ref (SO {$so['order_no']}) dispatched: delivery $delivery, invoice $invoice dated $inv_date \$"
-        .number_format($total, 2).(count($made) ? '; made '.implode(', ', $made) : ''), $warn);
+        .number_format($total, 2).(count($opens) ? '; opened '.medusa_opens_text($opens) : '')
+        .(count($made) ? '; made '.implode(', ', $made) : ''), $warn);
 }
 
 /** Dispatches every waiting order; returns [lines, errors]. Off (nothing) when "dispatch from" is blank. */
@@ -182,13 +233,13 @@ function medusa_run_dispatch() {
     if (!$from) return array($lines, $errors);
     $avail = array();
     foreach (medusa_orders_to_dispatch($from) as $so) {
-        list($wos, $short) = medusa_dispatch_plan($so, $avail);
+        list($wos, $short, $opens) = medusa_dispatch_plan($so, $avail);
         if (count($short)) {
             $errors[] = "{$so['customer_ref']} (SO {$so['order_no']}) held, short: ".medusa_qty_text($short);
             continue;
         }
         try {
-            list($ok, $text, $warn) = medusa_dispatch_order($so, $wos);
+            list($ok, $text, $warn) = medusa_dispatch_order($so, $wos, $opens);
         } catch (Throwable $e) {
             cancel_transaction();
             list($ok, $text, $warn) = array(false, "{$so['customer_ref']} (SO {$so['order_no']}) not dispatched: ".$e->getMessage(), '');

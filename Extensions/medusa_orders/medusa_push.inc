@@ -10,7 +10,8 @@ kit % = 1 − FA kit price ÷ Σ FA part list (as the catalog seed did).
 
 Stock: the shop tracks POOLS (bulk grit in oz, Gugolz in half kg, pads,
 plates, AccuLap), not the jars. Pool qty = FA on hand (pool + anything built
-from it, e.g. finished jars) − undelivered FA sales orders, all converted
+from it, e.g. finished jars, + sealed cartons of it) − undelivered FA sales
+orders, all converted
 through BOMs and foreign codes into pool units. Variant → pool links and the
 kit parts list are rebuilt from the FA BOM too, so a BOM change in FA reaches
 the shop on the next push.
@@ -62,8 +63,13 @@ function medusa_pool_units($sku, $qty = 1.0) {
 function medusa_pool_stock($loc) {
     global $MEDUSA_POOLS;
     $stock = array_fill_keys(array_keys($MEDUSA_POOLS), 0.0);
-    $add = function ($sku, $qty) use (&$stock) {
+    $cartons = medusa_cartons();
+    // A sealed carton counts toward its bulk pool too (dispatch opens one when the
+    // bulk runs short); the carton's own shop product stays untracked.
+    $add = function ($sku, $qty) use (&$stock, $cartons) {
         foreach (medusa_pool_units($sku, $qty) as $k => $v) $stock[$k] += $v;
+        if (isset($cartons[$sku]))
+            foreach (medusa_pool_units($cartons[$sku][0], $qty * $cartons[$sku][1]) as $k => $v) $stock[$k] += $v;
     };
     $res = db_query("SELECT stock_id, SUM(qty) q FROM ".TB_PREF."stock_moves WHERE loc_code = ".db_escape($loc)
         ." GROUP BY stock_id HAVING q <> 0", "on hand");
