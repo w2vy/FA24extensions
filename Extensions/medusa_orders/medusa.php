@@ -34,7 +34,7 @@ if (isset($_POST['action'])) $action = $_POST['action'];
 if (!$found && $action != 'create') $action = 'show';
 if ($found) medusa_upgrade_table();
 
-$SETTINGS = array('url', 'apikey', 'stripekey', 'startorder', 'taxgroup', 'bank', 'location', 'dispatchfrom');
+$SETTINGS = array('url', 'fallback_url', 'apikey', 'stripekey', 'startorder', 'taxgroup', 'bank', 'location', 'dispatchfrom');
 
 if ($action == 'create') {
     medusa_create_table();
@@ -73,6 +73,8 @@ if ($action == 'cron') {
         foreach ($lines as $l) echo "$l\n";
         foreach ($errors as $e) echo "ERROR: $e\n";
     }
+    global $MEDUSA_ROUTE;
+    if ($MEDUSA_ROUTE) echo "ROUTE: ".$MEDUSA_ROUTE[0]." failed (".$MEDUSA_ROUTE[1]."); used ".$MEDUSA_ROUTE[2]."\n";
     echo "DONE\n";
     exit;
 }
@@ -147,6 +149,7 @@ if ($action == 'show') {
     label_row("Table Status", $found ? "Found" : "<font color=red>Not Found</font>");
     if ($found) {
         text_row("Shop URL (https://...)", 'url', medusa_get('url'), 40, 200);
+        text_row("Fallback URL when the shop URL fails (Flux address, blank = none)", 'fallback_url', medusa_get('fallback_url'), 40, 200);
         text_row("Medusa secret API key" . (medusa_get('apikey') != '' ? " (saved; blank = keep)" : ""), 'apikey', '', 40, 200);
         text_row("Stripe read key" . (medusa_get('stripekey') != '' ? " (saved; blank = keep)" : ""), 'stripekey', '', 40, 200);
         text_row("Last imported shop order #", 'startorder', medusa_get('startorder', 0), 10, 20);

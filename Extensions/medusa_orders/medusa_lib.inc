@@ -71,12 +71,40 @@ function medusa_http($method, $url, $userpwd, $body = null) {
     return array($status, $json, $err);
 }
 
+// Set when the shop URL failed this run and the Flux address answered instead:
+// [shop host, its error, fallback host]. The timer prints it as one ROUTE: line.
+$MEDUSA_ROUTE = null;
+
+/** No answer from the shop itself: Cloudflare/gateway errors, no connection, timeout. */
+function medusa_route_failed($status, $err) {
+    return $err != '' && ($status == 0 || $status == 403 || $status >= 500);
+}
+
+/**
+ * The shop's Admin API. When the shop URL (www, through Cloudflare) fails and a
+ * Flux address is set, the call goes there, and so does the rest of the run.
+ * Only a GET is resent: a POST that timed out may have been applied already.
+ */
 function medusa_api($method, $path, $query = array(), $body = null) {
+    global $MEDUSA_ROUTE;
     // A blank login can hang at the shop's gateway for a minute; don't send one.
     if (medusa_get('apikey') == '') return array(0, null, 'no API key set (Configuration)');
-    $url = rtrim(medusa_get('url'), '/') . $path;
-    if (count($query)) $url .= '?' . http_build_query($query);
-    return medusa_http($method, $url, medusa_get('apikey') . ':', $body);
+    $qs = count($query) ? '?' . http_build_query($query) : '';
+    $main = rtrim(medusa_get('url'), '/');
+    $alt = rtrim(medusa_get('fallback_url'), '/');
+    $login = medusa_get('apikey') . ':';
+    if ($MEDUSA_ROUTE !== null) return medusa_http($method, $alt . $path . $qs, $login, $body);
+    $r = medusa_http($method, $main . $path . $qs, $login, $body);
+    if ($alt == '' || !medusa_route_failed($r[0], $r[2])) return $r;
+    $MEDUSA_ROUTE = array(parse_url($main, PHP_URL_HOST), $r[2], parse_url($alt, PHP_URL_HOST));
+    if ($method != 'GET') return $r;
+    $r2 = medusa_http($method, $alt . $path . $qs, $login, $body);
+    if ($r2[2] != '') {
+        // Both failed: report both, and stop using the fallback.
+        $MEDUSA_ROUTE = null;
+        $r2[2] = $r[2] . " (and via " . parse_url($alt, PHP_URL_HOST) . ": " . $r2[2] . ")";
+    }
+    return $r2;
 }
 
 /**
