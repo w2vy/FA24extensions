@@ -101,7 +101,8 @@ $MEDUSA_ORDER_FIELDS = 'id,display_id,email,created_at,currency_code,status,paym
     . 'items.variant_sku,items.title,items.quantity,items.unit_price,items.subtotal,'
     . 'items.tax_lines.code,items.variant.metadata,'
     . 'payment_collections.payments.id,payment_collections.payments.amount,payment_collections.payments.data,'
-    . 'payment_collections.payments.captured_at,payment_collections.payments.canceled_at';
+    . 'payment_collections.payments.captured_at,payment_collections.payments.canceled_at,'
+    . 'payment_collections.payments.refunds.amount';
 
 /** Paid, then refunded in full before it shipped: only Stripe's kept fee goes into FA. */
 function medusa_order_refunded_unshipped($o) {
@@ -310,12 +311,16 @@ function medusa_import_order($o, $opts) {
             add_to_order($cart, $l[0], $l[1], $l[2], $l[3]);
     $order_no = $cart->write(0);
 
-    // One FA customer payment per captured Stripe payment, unallocated; fee = bank charge.
+    // One FA customer payment per captured Stripe payment, net of its refunds (a refund
+    // before shipping went back to the card), unallocated; fee = bank charge (Stripe keeps it).
     $pays = array();
     foreach ($o['payment_collections'] as $pc) {
         foreach ((array)$pc['payments'] as $p) {
             if (empty($p['captured_at']) || !empty($p['canceled_at'])) continue;
-            $amount = round((float)$p['amount'], 2);
+            $amount = (float)$p['amount'];
+            foreach ((array)(isset($p['refunds']) ? $p['refunds'] : array()) as $r)
+                $amount -= (float)$r['amount'];
+            $amount = round($amount, 2);
             $charge = isset($p['data']['latest_charge']) ? $p['data']['latest_charge'] : '';
             $fee = $fees[$p['id']];
             $date = sql2date(substr($p['captured_at'], 0, 10));
