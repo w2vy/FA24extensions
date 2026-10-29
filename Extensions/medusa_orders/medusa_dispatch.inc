@@ -167,7 +167,9 @@ function medusa_dispatch_order($so, $wos) {
 
     $total = round((float)$inv['Total'], 2);
     $warn = abs($paid - $total) < 0.005 ? '' : "$ref (SO {$so['order_no']}, invoice $invoice): invoice \$"
-        .number_format($total, 2).", payment(s) \$".number_format($paid, 2)."; the rest is left unallocated";
+        .number_format($total, 2).", payment(s) \$".number_format($paid, 2)."; "
+        .($paid < $total ? "invoice \$".number_format($total - $paid, 2)." left open"
+            : "payment \$".number_format($paid - $total, 2)." left unallocated");
     return array(true, "$ref (SO {$so['order_no']}) dispatched: delivery $delivery, invoice $invoice dated $inv_date \$"
         .number_format($total, 2).(count($made) ? '; made '.implode(', ', $made) : ''), $warn);
 }
