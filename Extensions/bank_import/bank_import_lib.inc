@@ -68,7 +68,7 @@ function bi_parse($path) {
     if (!$fp) return array(array(), "could not open the file");
     $head = fgetcsv($fp, 0, ',', '"', '');
     if (!$head) return array(array(), "empty file");
-    $head[0] = preg_replace('/^\xEF\xBB\xBF/', '', $head[0]);  // UTF-8 BOM
+    $head[0] = trim(preg_replace('/^\xEF\xBB\xBF/', '', $head[0]), '"');  // UTF-8 BOM (before a quoted "Date", fgetcsv keeps the quotes)
     $col = array_flip(array_map('trim', $head));
     $rows = array();
     while (($r = fgetcsv($fp, 0, ',', '"', '')) !== false) {
@@ -93,8 +93,11 @@ function bi_parse($path) {
         }
     } elseif (isset($col['Transaction ID'], $col['Net'], $col['Balance'])) {
         // PayPal "Balance affecting": completed rows only; Memo rows don't move the balance.
+        // A bank pull that funds a payment ("Bank Deposit to PP Account") stays Pending but
+        // moves the Balance column, so it is kept (2/19 eBay -183.07 / +183.07).
         foreach ($rows as $r) {
-            if ($f($r, 'Status') != 'Completed' || $f($r, 'Balance Impact') == 'Memo') continue;
+            $funding = stripos($f($r, 'Type'), 'Bank Deposit to PP') === 0;
+            if (($f($r, 'Status') != 'Completed' && !$funding) || $f($r, 'Balance Impact') == 'Memo') continue;
             $posted = bi_mdy($f($r, 'Date'));
             if ($posted == '') return array(array(), "bad Date: ".implode(',', $r));
             $net = round(bi_money($f($r, 'Net')), 2);
@@ -181,6 +184,17 @@ function bi_match_payout($bank, $line, $taken) {
     return $find(0, $want) ? $pick : array();
 }
 
+/** A PayPal payment paid by a bank pull and booked in ANOTHER FA bank as the payment itself (eBay 2/19 -> 1/4176 in bank 8). */
+function bi_paid_elsewhere($bank, $line) {
+    $p = db_escape($line['posted']);
+    $sql = "SELECT b.bank_act, b.type, b.trans_no FROM ".TB_PREF."bank_trans b"
+        ." LEFT JOIN ".TB_PREF."voided v ON v.type = b.type AND v.id = b.trans_no"
+        ." WHERE b.bank_act != ".db_escape($bank)." AND v.id IS NULL AND b.type IN (".ST_BANKPAYMENT.", ".ST_SUPPAYMENT.")"
+        ." AND ROUND(b.amount, 2) = ".round($line['amount'], 2)
+        ." AND b.trans_date BETWEEN DATE_SUB($p, INTERVAL 7 DAY) AND DATE_ADD($p, INTERVAL 7 DAY) LIMIT 1";
+    return db_fetch_assoc(db_query($sql, "could not look in the other banks"));
+}
+
 /** PayPal money booked as a customer payment in ANOTHER FA bank (Woo #1709 -> bank 8). */
 function bi_booked_elsewhere($bank, $line) {
     $p = db_escape($line['posted']);
@@ -243,6 +257,11 @@ function bi_plan($bank, $lines) {
     $rules = bi_rules($bank);
     $taken = array();
     $elsewhere_out = array();   // PayPal: amounts booked elsewhere whose withdrawal is still to come
+    $funded = array();          // PayPal: payment txid => its bank-pull funding line
+    foreach ($lines as $i => $l)
+        if (isset($l['txid']) && stripos($l['ptype'], 'Bank Deposit to PP') === 0 && $l['reftx'] != '')
+            $funded[$l['reftx']] = $i;
+    $funded_elsewhere = array();
     foreach ($lines as $i => $l) {
         $plan = array('status' => 'unknown', 'note' => '', 'bt' => array(), 'action' => 'leave', 'target' => '');
         $known = db_fetch_row(db_query("SELECT status FROM ".TB_PREF."bank_import_lines WHERE bank_act = "
@@ -268,6 +287,19 @@ function bi_plan($bank, $lines) {
                 $plan['status'] = 'elsewhere';
                 $plan['note'] = "booked in bank ".$e['bank_act']." (".$e['type']."/".$e['trans_no'].")";
                 $elsewhere_out[$cents] = $l['posted'];
+                $lines[$i]['plan'] = $plan;
+                continue;
+            }
+            if ($l['amount'] < 0 && isset($funded[$l['txid']]) && ($e = bi_paid_elsewhere($bank, $l))) {
+                $plan['status'] = 'elsewhere';
+                $plan['note'] = "paid by a bank pull, booked in bank ".$e['bank_act']." (".$e['type']."/".$e['trans_no'].")";
+                $funded_elsewhere[$l['txid']] = 1;
+                $lines[$i]['plan'] = $plan;
+                continue;
+            }
+            if ($l['amount'] > 0 && isset($funded_elsewhere[$l['reftx']])) {
+                $plan['status'] = 'elsewhere';
+                $plan['note'] = "bank pull for the payment booked in another bank";
                 $lines[$i]['plan'] = $plan;
                 continue;
             }
@@ -492,9 +524,13 @@ function bi_starter_rules() {
         array(20, 8, 'CLOUD.RUNONFLUX.IO', 0, 'qe', '15'),
         array(20, 8, 'WP*WOOCOMMER', 0, 'qe', '5'),
         array(20, 8, 'ANTHROPIC', 0, 'qe', '15'),
+        array(20, 8, 'WESTHOST', 0, 'qe', '15'),
+        array(20, 8, 'DNH*DOMAINS', 0, 'qe', '15'),
+        array(20, 8, 'NAME-CHEAP', 0, 'qe', '15'),
         array(20, 8, 'FRONTIER COMMUNI', -1, 'qe', '15'),
         array(20, 8, 'Duke Energy', -1, 'qe', '21'),
         array(20, 8, 'FEDEX', -1, 'qe', '26'),
+        array(15, 8, 'PAYPAL *', -1, 'transfer', '3'),   // card paid inside PayPal (PAYPAL *USPS): the PayPal file posts the payment
         array(20, 8, 'USPS', 0, 'qe', '5'),
         array(20, 8, 'ULINE', -1, 'supplier', '24'),
         array(20, 8, 'SALEFABR', -1, 'supplier', '1'),
@@ -504,6 +540,7 @@ function bi_starter_rules() {
         array(30, 8, 'PAYPAL', 1, 'transfer', '3'),
         array(10, 3, 'User Initiated Withdrawal', -1, 'transfer', '8'),
         array(10, 3, 'General Card Deposit', 1, 'transfer', '8'),
+        array(10, 3, 'Bank Deposit to PP Account', 1, 'transfer', '8'),
         array(20, 3, 'General Payment', 1, 'customer', ''),
         array(20, 3, 'U.S. Postal Service', -1, 'qe', '5'),
     );
