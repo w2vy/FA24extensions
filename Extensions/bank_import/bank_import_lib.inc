@@ -535,6 +535,14 @@ function bi_starter_rules() {
         array(20, 8, 'ULINE', -1, 'supplier', '24'),
         array(20, 8, 'SALEFABR', -1, 'supplier', '1'),
         array(20, 8, 'SALEM DISTRIBUTING', -1, 'supplier', '1'),
+        // from tom's Jan-May 2026 bookings
+        array(20, 8, 'US DENTAL DEPOT', -1, 'supplier', '22'),
+        array(20, 8, 'DAL-TILE', -1, 'supplier', '4'),
+        array(20, 8, 'EBAY', 0, 'qe', '6'),             // 10 of 15 = Office Supplies; change the odd one in the preview
+        array(20, 8, 'PADDLE.NET', -1, 'qe', '15'),
+        array(20, 8, 'HRBLOCK', -1, 'gl', '5610'),
+        array(20, 8, 'SUNBIZ', -1, 'gl', '5795'),
+        array(20, 8, 'INTERNATIONAL SERVICE ASSESSMENT', -1, 'qe', '11'),
         array(30, 8, 'WooPayments', 1, 'payout', ''),
         array(30, 8, 'STRIPE', 1, 'payout', ''),
         array(30, 8, 'PAYPAL', 1, 'transfer', '3'),
