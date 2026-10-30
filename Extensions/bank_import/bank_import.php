@@ -120,7 +120,14 @@ if (in_array($action, array('stripe_save', 'stripe_setup')) && !get_bank_account
 if ($action == 'stripe_save') {
     $bank = (int)get_post('st_bank');
     // The field shows the saved key masked: unchanged stars = keep it, empty = remove it, anything else = the new key.
-    // Checked first: nothing is saved unless all of it is right.
+    // Checked first: nothing is saved unless all of it is right. Skip = payout ids only (a date or a stray "." is refused).
+    $skip = array();
+    foreach (preg_split('/[\s,]+/', trim(get_post('st_skip')), -1, PREG_SPLIT_NO_EMPTY) as $po) {
+        $po = rtrim($po, '.;');
+        if (preg_match('/^po_[A-Za-z0-9]+$/', $po)) $skip[] = $po;
+        else $errors[] = "\"$po\" is not a payout id (po_..., from Stripe). Nothing saved.";
+    }
+    $_POST['st_skip'] = implode(',', $skip);
     if (get_post('st_gl') != '' && !bi_is_income_gl(get_post('st_gl')))
         $errors[] = "GL ".get_post('st_gl')." is not an income account: pick the income GL (4101). Nothing saved.";
     if (get_post('st_to') != '' && (get_post('st_to') == $bank || !get_bank_account(get_post('st_to'))))
