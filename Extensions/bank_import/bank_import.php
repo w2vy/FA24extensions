@@ -155,7 +155,9 @@ if ($action == 'reconcile' && isset($_POST['r_reconcile'])) {
 
 // ---- page -------------------------------------------------------------------
 
-page("Bank Statement Import");
+$js = '';
+if (user_use_date_picker()) $js .= get_js_date_picker();
+page("Bank Statement Import", false, false, '', $js);
 $tabs = array('upload' => 'Upload', 'rules' => 'Rules', 'reconcile' => 'Reconcile');
 $sep = '';
 foreach ($tabs as $a => $label) {
@@ -274,9 +276,10 @@ if ($action == 'rules') {
 if ($action == 'reconcile') {
     $bank = (int)get_post('bank_account', 8);
     if (get_post('reconcile_date') == '') {
-        $r = db_fetch_row(db_query("SELECT MAX(posted) FROM ".TB_PREF."bank_import_lines WHERE reconciled IS NULL AND bank_act = "
+        // Default = the end of the first month not yet reconciled (or the last line, if sooner): statements go month by month.
+        $r = db_fetch_row(db_query("SELECT MIN(posted), MAX(posted) FROM ".TB_PREF."bank_import_lines WHERE reconciled IS NULL AND bank_act = "
             .db_escape($bank), "last line"));
-        $_POST['reconcile_date'] = $r && $r[0] ? sql2date($r[0]) : Today();
+        $_POST['reconcile_date'] = $r && $r[0] ? sql2date(min(date('Y-m-t', strtotime($r[0])), $r[1])) : Today();
     }
     $to = date2sql($_POST['reconcile_date']);
     start_form();
