@@ -37,6 +37,20 @@ function bi_create_tables() {
         ." `target` varchar(20) NOT NULL default '', `inactive` tinyint NOT NULL default 0,"
         ." PRIMARY KEY (`id`))",
         "Error creating bank_import_rules");
+    db_query("CREATE TABLE IF NOT EXISTS ".TB_PREF."bank_import_settings ("
+        ." `name` varchar(60) NOT NULL, `value` text NOT NULL, PRIMARY KEY (`name`))",
+        "Error creating bank_import_settings");
+}
+
+function bi_get($name, $default = '') {
+    $row = db_fetch_row(db_query("SELECT value FROM ".TB_PREF."bank_import_settings WHERE name = ".db_escape($name),
+        "could not read setting"));
+    return is_array($row) ? $row[0] : $default;
+}
+
+function bi_set($name, $value) {
+    db_query("REPLACE INTO ".TB_PREF."bank_import_settings (name, value) VALUES (".db_escape($name).", ".db_escape($value).")",
+        "could not write setting");
 }
 
 // ---- parsing ----------------------------------------------------------------
@@ -122,6 +136,117 @@ function bi_parse($path) {
                 .": ".number_format($lines[$i - 1]['balance'], 2)." + ".number_format($lines[$i]['amount'], 2)
                 ." = ".number_format($want, 2).", file says ".number_format($lines[$i]['balance'], 2)
                 .". A line is missing or out of order; nothing loaded.");
+    }
+    return array($lines, '');
+}
+
+// ---- Stripe (Flux Hub) ------------------------------------------------------
+//
+// A Stripe account is a clearing bank account in FA: its lines are the account's
+// balance transactions, fetched with a read key instead of uploaded. Settings per
+// FA bank: stripe_key:<bank>, stripe_gl:<bank> (income), stripe_to:<bank> (the bank
+// payouts land in), stripe_from:<bank> (Y-m-d, blank = all), stripe_skip:<bank>
+// (payout ids, comma separated, already booked by hand: they and their lines are left out).
+
+/** GET a Stripe list endpoint, every page: [rows, error]. */
+function bi_stripe_list($key, $path, $query = array()) {
+    $rows = array();
+    $query['limit'] = 100;
+    do {
+        $c = curl_init('https://api.stripe.com/v1/'.$path.'?'.http_build_query($query));
+        curl_setopt($c, CURLOPT_RETURNTRANSFER, 1);
+        curl_setopt($c, CURLOPT_USERPWD, $key.':');
+        curl_setopt($c, CURLOPT_TIMEOUT, 60);
+        $raw = curl_exec($c);
+        $status = curl_getinfo($c, CURLINFO_HTTP_CODE);
+        $err = $raw === false ? curl_error($c) : '';
+        curl_close($c);
+        $json = $raw === false ? null : json_decode($raw, true);
+        if ($err == '' && ($status >= 400 || !isset($json['data'])))
+            $err = isset($json['error']['message']) ? $json['error']['message'] : "HTTP $status";
+        if ($err != '') return array(array(), "Stripe $path: $err");
+        foreach ($json['data'] as $r) $rows[] = $r;
+        if (count($json['data'])) $query['starting_after'] = $json['data'][count($json['data']) - 1]['id'];
+    } while (!empty($json['has_more']));
+    return array($rows, '');
+}
+
+/** Stripe's balance now (available + pending, USD), or [null, error]. */
+function bi_stripe_balance($key) {
+    $c = curl_init('https://api.stripe.com/v1/balance');
+    curl_setopt($c, CURLOPT_RETURNTRANSFER, 1);
+    curl_setopt($c, CURLOPT_USERPWD, $key.':');
+    curl_setopt($c, CURLOPT_TIMEOUT, 60);
+    $raw = curl_exec($c);
+    $json = $raw === false ? null : json_decode($raw, true);
+    if (!isset($json['available'])) return array(null, "Stripe balance: "
+        .(isset($json['error']['message']) ? $json['error']['message'] : ($raw === false ? curl_error($c) : 'no answer')));
+    $cents = 0;
+    foreach (array('available', 'pending') as $k)
+        foreach ($json[$k] as $b) if ($b['currency'] == 'usd') $cents += $b['amount'];
+    return array($cents / 100.0, '');
+}
+
+/**
+ * The Stripe account's balance transactions as statement lines, oldest first (same shape
+ * as bi_parse; fee is negative, as in PayPal's CSV). Stripe has no running balance per line,
+ * so it is worked back from today's Stripe balance: the reconcile then checks the opening
+ * against FA. Each line carries 'st' = the action it posts by unless FA already has it.
+ */
+function bi_stripe_lines($bank) {
+    $key = bi_get("stripe_key:$bank");
+    if ($key == '' || bi_get("stripe_gl:$bank") == '' || bi_get("stripe_to:$bank") == '')
+        return array(array(), "Stripe key, income GL and payout bank must all be set for ".bi_bank_name($bank)." (Stripe tab)");
+    $q = array();
+    if (($from = bi_get("stripe_from:$bank")) != '') $q['created[gte]'] = strtotime($from.' 00:00:00 America/New_York');
+    list($rows, $err) = bi_stripe_list($key, 'balance_transactions', $q);
+    if ($err != '') return array(array(), $err);
+    list($now, $err) = bi_stripe_balance($key);
+    if ($err != '') return array(array(), $err);
+
+    $skip = array();
+    foreach (array_filter(array_map('trim', explode(',', bi_get("stripe_skip:$bank")))) as $po) {
+        $skip[$po] = 1;
+        list($in, $err) = bi_stripe_list($key, 'balance_transactions', array('payout' => $po));
+        if ($err != '') return array(array(), $err);
+        foreach ($in as $t) $skip[$t['id']] = 1;
+    }
+    // Lines left out (before the from date, or in a skipped payout) are still in today's balance.
+    $left_out = 0;
+    if (count($skip) || $from != '') {
+        $all = $rows;
+        if ($from != '') list($all, $err) = bi_stripe_list($key, 'balance_transactions');
+        if ($err != '') return array(array(), $err);
+        $kept = array();
+        foreach ($rows as $t) $kept[$t['id']] = 1;
+        foreach ($all as $t) if (!isset($kept[$t['id']]) || isset($skip[$t['id']]) || isset($skip[$t['source']]))
+            $left_out += $t['net'];
+    }
+
+    $income = bi_get("stripe_gl:$bank");
+    $to = bi_get("stripe_to:$bank");
+    $tz = new DateTimeZone('America/New_York');
+    $lines = array();
+    foreach (array_reverse($rows) as $t) {   // Stripe lists newest first
+        if (isset($skip[$t['id']]) || isset($skip[$t['source']])) continue;
+        if ($t['currency'] != 'usd') return array(array(), "$t[id] is in $t[currency], not USD");
+        $d = new DateTime('@'.$t['created']);
+        $d->setTimezone($tz);
+        $type = $t['type'];
+        $st = array('leave', '');
+        if ($type == 'charge' || $type == 'payment') $st = array('gl', $income);
+        elseif ($type == 'refund' || $type == 'payment_refund') $st = array('gl', $income);
+        elseif ($type == 'payout') $st = array('transfer', $to);
+        elseif ($type == 'stripe_fee' || $type == 'tax_fee') $st = array('gl', get_company_pref('bank_charge_act'));
+        $lines[] = array('key' => 'ST:'.$t['id'], 'posted' => $d->format('Y-m-d'), 'tdate' => $d->format('Y-m-d'),
+            'descr' => substr("Stripe $type | ".$t['description']." | ".$t['source'], 0, 255),
+            'amount' => round($t['net'] / 100.0, 2), 'gross' => round($t['amount'] / 100.0, 2),
+            'fee' => -round($t['fee'] / 100.0, 2), 'st' => $st);
+    }
+    $bal = round($now - $left_out / 100.0, 2);
+    for ($i = count($lines) - 1; $i >= 0; $i--) {
+        $lines[$i]['balance'] = $bal;
+        $bal = round($bal - $lines[$i]['amount'], 2);
     }
     return array($lines, '');
 }
@@ -338,6 +463,18 @@ function bi_plan($bank, $lines) {
                 continue;
             }
         }
+        if (isset($l['st'])) {
+            // Stripe: the transaction type says what it is; no rules.
+            if ($l['st'][0] != 'leave') {
+                $plan['status'] = 'rule';
+                $plan['action'] = $l['st'][0];
+                $plan['target'] = $l['st'][1];
+                $plan['note'] = "Stripe ".($l['st'][0] == 'transfer' ? 'payout' : 'type');
+            } else
+                $plan['note'] = "Stripe type not known: pick by hand";
+            $lines[$i]['plan'] = $plan;
+            continue;
+        }
         $sign = $l['amount'] > 0 ? 1 : -1;
         foreach ($rules as $r) {
             if ($r['sign'] != 0 && $r['sign'] != $sign) continue;
@@ -417,7 +554,7 @@ function bi_post($bank, $l, $action, $target) {
     $memo = 'BANK: '.$l['descr'];
     if (!empty($l['tdate']) && $l['tdate'] != $l['posted']) $memo .= ' (on '.sql2date($l['tdate']).')';
     $amt = $l['amount'];
-    // PayPal rows: the payee gets the gross, PayPal's fee goes to bank charges; the bank moves by the net.
+    // PayPal/Stripe rows: the payee gets the gross, the fee goes to bank charges; the bank moves by the net.
     $gross = isset($l['gross']) ? $l['gross'] : $amt;
     $fee = isset($l['fee']) ? $l['fee'] : 0;
 
@@ -438,7 +575,8 @@ function bi_post($bank, $l, $action, $target) {
             $ptype = PT_MISC;
             $pid = substr($l['descr'], 0, 40);
         }
-        if ($fee != 0) $cart->add_gl_item(get_company_pref('bank_charge_act'), 0, 0, -$fee, 'PayPal fee');
+        if ($fee != 0) $cart->add_gl_item(get_company_pref('bank_charge_act'), 0, 0, -$fee,
+            strpos($l['key'], 'ST:') === 0 ? 'Stripe fee' : 'PayPal fee');
         $ref = $Refs->get_next($type, null, $date);
         list($t, $no) = write_bank_transaction($type, 0, $bank, $cart, $date, $ptype, $pid, 0, $ref, $memo, true, null);
         return bi_bank_trans_id($bank, $t, $no);

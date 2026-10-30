@@ -19,12 +19,16 @@ include_once($path_to_root . "/purchasing/includes/purchasing_db.inc");
 include_once($path_to_root . "/admin/db/fiscalyears_db.inc");
 include_once($path_to_root . "/modules/bank_import/bank_import_lib.inc");
 
-$found = bi_table_exists();
 $action = isset($_GET['action']) ? $_GET['action'] : 'upload';
 if (isset($_POST['action'])) $action = $_POST['action'];
-if (!$found) {
-    bi_create_tables();
-    $found = true;
+bi_create_tables();     // IF NOT EXISTS: also adds tables a later version brought (settings)
+
+/** FA banks with a Stripe key: id => name. */
+function bi_stripe_banks() {
+    $out = array();
+    $res = db_query("SELECT id, bank_account_name FROM ".TB_PREF."bank_accounts WHERE inactive = 0 ORDER BY bank_account_name", "banks");
+    while ($b = db_fetch_assoc($res)) if (bi_get('stripe_key:'.$b['id']) != '') $out[$b['id']] = $b['bank_account_name'];
+    return $out;
 }
 
 $ACTIONS = array('skip' => 'Skip (nothing in FA)', 'gl' => 'GL account #', 'supplier' => 'Supplier #',
@@ -83,6 +87,35 @@ if ($action == 'preview') {
             $_SESSION['bank_import'] = array('bank' => $bank, 'file' => $_FILES['imp']['name'],
                 'upload_id' => time(), 'lines' => bi_plan($bank, $lines));
     }
+}
+if ($action == 'fetch') {
+    $bank = (int)get_post('stripe_bank');
+    list($lines, $err) = bi_stripe_lines($bank);
+    if ($err != '') {
+        $errors[] = $err;
+        $action = 'upload';
+    } else {
+        $_SESSION['bank_import'] = array('bank' => $bank, 'file' => 'Stripe',
+            'upload_id' => time(), 'lines' => bi_plan($bank, $lines));
+        $action = 'preview';
+    }
+}
+
+// ---- Stripe settings ----------------------------------------------------------
+
+$ST_FIELDS = array('gl' => 'Income GL account #', 'to' => 'Payouts land in (FA bank #)',
+    'from' => 'Fetch from (Y-m-d, blank = all)', 'skip' => 'Payouts already booked by hand (po_..., comma separated)');
+if ($action == 'stripe_save') {
+    $bank = (int)get_post('st_bank');
+    if (trim(get_post('st_key')) != '') bi_set("stripe_key:$bank", trim(get_post('st_key')));
+    if (check_value('st_clear')) bi_set("stripe_key:$bank", '');
+    foreach ($ST_FIELDS as $f => $label) bi_set("stripe_$f:$bank", trim(get_post("st_$f")));
+    if (bi_get("stripe_gl:$bank") != '' && !get_gl_account(bi_get("stripe_gl:$bank")))
+        $errors[] = "no GL account ".bi_get("stripe_gl:$bank");
+    if (bi_get("stripe_to:$bank") != '' && !get_bank_account(bi_get("stripe_to:$bank")))
+        $errors[] = "no bank account #".bi_get("stripe_to:$bank");
+    if (!count($errors)) $log[] = "Stripe settings saved for ".bi_bank_name($bank);
+    $action = 'stripe';
 }
 
 if ($action == 'create' && isset($_SESSION['bank_import'])) {
@@ -179,7 +212,7 @@ if ($action == 'reconcile' && isset($_POST['r_reconcile'])) {
 $js = '';
 if (user_use_date_picker()) $js .= get_js_date_picker();
 page("Bank Statement Import", false, false, '', $js);
-$tabs = array('upload' => 'Upload', 'rules' => 'Rules', 'reconcile' => 'Reconcile');
+$tabs = array('upload' => 'Upload', 'rules' => 'Rules', 'reconcile' => 'Reconcile', 'stripe' => 'Stripe');
 $sep = '';
 foreach ($tabs as $a => $label) {
     echo $sep;
@@ -200,6 +233,49 @@ if ($action == 'upload') {
     end_table(1);
     hidden('action', 'preview');
     submit_center('preview', "Preview");
+    end_form();
+    if (count($sb = bi_stripe_banks())) {
+        start_form();
+        start_table(TABLESTYLE2, "width=50%");
+        table_section_title("Or fetch a Stripe account's transactions");
+        $o = '';
+        foreach ($sb as $id => $name) $o .= "<option value='$id'>".htmlspecialchars($name)."</option>";
+        label_row("Bank Account:", "<select name='stripe_bank'>$o</select>");
+        end_table(1);
+        hidden('action', 'fetch');
+        submit_center('fetch', "Fetch from Stripe");
+        end_form();
+    }
+    end_page();
+}
+
+if ($action == 'stripe') {
+    $bank = (int)get_post('st_bank', ($sb = bi_stripe_banks()) ? key($sb) : 0);
+    display_note("A Stripe account is a clearing bank account: Fetch (Upload tab) loads its balance transactions."
+        ." Payments go to the income GL (fee to bank charges), refunds back to it, payouts = transfer to the payout bank."
+        ." Use a read-only key.", 0, 1);
+    // Picking the bank is its own form: a change must never post (and save) the settings below.
+    start_form();
+    start_table(TABLESTYLE2);
+    bank_accounts_list_row("Bank Account:", 'st_bank', $bank);
+    end_table(1);
+    hidden('action', 'stripe');
+    submit_center('show', "Show", true, false, false);
+    end_form();
+    start_form();
+    hidden('st_bank', $bank);
+    start_table(TABLESTYLE2);
+    table_section_title(bi_bank_name($bank));
+    $k = bi_get("stripe_key:$bank");
+    text_row("Stripe key".($k != '' ? " (saved: ".substr($k, 0, 8)."…; blank = keep)" : ""), 'st_key', '', 40, 200);
+    if ($k != '') check_row("Remove the saved key:", 'st_clear', 0);
+    foreach ($ST_FIELDS as $f => $label) {
+        $_POST["st_$f"] = bi_get("stripe_$f:$bank");
+        text_row("$label:", "st_$f", null, 40, 255);
+    }
+    end_table(1);
+    hidden('action', 'stripe_save');
+    submit_center('stripe_save', "Save");
     end_form();
     end_page();
 }
