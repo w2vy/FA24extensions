@@ -303,7 +303,8 @@ function bi_stripe_buyer($key, $t, &$l) {
             if ($top && !empty($top['description'])) $l['what'] = $top['description'];
             if ($l['email'] == '' && !empty($inv['customer_email'])) $l['email'] = $inv['customer_email'];
             if ($l['name'] == '' && !empty($inv['customer_name'])) $l['name'] = $inv['customer_name'];
-            if (!empty($meta['providerSlug'])) $l['what'] .= ' ('.$meta['providerSlug'].')';
+            if (!empty($meta['providerSlug']) && strpos($l['what'], '('.$meta['providerSlug'].')') === false)
+                $l['what'] .= ' ('.$meta['providerSlug'].')';
         }
     }
     return '';
