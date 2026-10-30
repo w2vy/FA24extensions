@@ -113,16 +113,23 @@ if ($action == 'fetch') {
 
 $ST_FIELDS = array('gl' => 'Income GL account', 'to' => 'Payouts land in',
     'from' => 'Fetch from (Y-m-d, blank = all)', 'skip' => 'Payouts already booked by hand (po_..., comma separated)');
+if (in_array($action, array('stripe_save', 'stripe_setup')) && !get_bank_account((int)get_post('st_bank'))) {
+    $errors[] = "Pick the Stripe bank account and press Show first";     // never save under bank 0
+    $action = 'stripe';
+}
 if ($action == 'stripe_save') {
     $bank = (int)get_post('st_bank');
     // The field shows the saved key masked: unchanged stars = keep it, empty = remove it, anything else = the new key.
-    if (strpos(get_post('st_key'), '****') === false) bi_set("stripe_key:$bank", trim(get_post('st_key')));
-    foreach ($ST_FIELDS as $f => $label) bi_set("stripe_$f:$bank", trim(get_post("st_$f")));
-    if (bi_get("stripe_gl:$bank") != '' && !get_gl_account(bi_get("stripe_gl:$bank")))
-        $errors[] = "no GL account ".bi_get("stripe_gl:$bank");
-    if (bi_get("stripe_to:$bank") != '' && !get_bank_account(bi_get("stripe_to:$bank")))
-        $errors[] = "no bank account #".bi_get("stripe_to:$bank");
-    if (!count($errors)) $log[] = "Stripe settings saved for ".bi_bank_name($bank);
+    // Checked first: nothing is saved unless all of it is right.
+    if (get_post('st_gl') != '' && !bi_is_income_gl(get_post('st_gl')))
+        $errors[] = "GL ".get_post('st_gl')." is not an income account: pick the income GL (4101). Nothing saved.";
+    if (get_post('st_to') != '' && (get_post('st_to') == $bank || !get_bank_account(get_post('st_to'))))
+        $errors[] = "Payouts must land in another bank account (Molten Tech LLC). Nothing saved.";
+    if (!count($errors)) {
+        if (strpos(get_post('st_key'), '****') === false) bi_set("stripe_key:$bank", trim(get_post('st_key')));
+        foreach ($ST_FIELDS as $f => $label) bi_set("stripe_$f:$bank", trim(get_post("st_$f")));
+        $log[] = "Stripe settings saved for ".bi_bank_name($bank);
+    }
     $action = 'stripe';
 }
 if ($action == 'stripe_setup') {
@@ -277,6 +284,11 @@ if ($action == 'stripe') {
     hidden('action', 'stripe');
     submit_center('show', "Show", true, false, false);
     end_form();
+    if (!get_bank_account($bank)) {
+        display_note("Pick the Stripe bank account (e.g. Flux Hub Stripe) and press Show.", 0, 1);
+        end_page();
+        exit;
+    }
     start_form();
     hidden('st_bank', $bank);
     start_table(TABLESTYLE2);

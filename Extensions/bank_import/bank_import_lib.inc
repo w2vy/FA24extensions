@@ -317,12 +317,19 @@ function bi_stripe_buyer($key, $t, &$l) {
 // note plus a bank payment back to the customer, allocated to each other. Flux Hub customers
 // are only ever matched inside their own area, never to a shop customer with the same email.
 
+/** Is this GL account in an income class (not a bank, AR or expense account)? */
+function bi_is_income_gl($code) {
+    $r = db_fetch_row(db_query("SELECT c.ctype FROM ".TB_PREF."chart_master m JOIN ".TB_PREF."chart_types t ON t.id = m.account_type"
+        ." JOIN ".TB_PREF."chart_class c ON c.cid = t.class_id WHERE m.account_code = ".db_escape($code), "GL class"));
+    return $r && $r[0] == CL_INCOME;
+}
+
 /** Create (if missing) the area, dimension, items and settings the customer posting needs. */
 function bi_stripe_setup($bank) {
     global $Refs;
     $log = array();
     $gl = bi_get("stripe_gl:$bank");
-    if ($gl == '' || !get_gl_account($gl)) return array("Set the income GL first");
+    if ($gl == '' || !bi_is_income_gl($gl)) return array("Set an income GL (4101) and Save first");
     $r = db_fetch_row(db_query("SELECT area_code FROM ".TB_PREF."areas WHERE description = 'Flux Hub'", "area"));
     if (!$r) {
         add_sales_area('Flux Hub');
@@ -345,6 +352,11 @@ function bi_stripe_setup($bank) {
                 get_company_pref('default_cogs_act'), get_company_pref('default_adj_act'), get_company_pref('default_wip_act'),
                 bi_get("stripe_dim:$bank"), 0, 0, 1, 1);
             $log[] = "item $it[0] added (sales GL $gl, tax free)";
+        } elseif (get_item($it[0])['sales_account'] != $gl) {
+            // Set up again after the income GL changed: the items follow it.
+            db_query("UPDATE ".TB_PREF."stock_master SET sales_account = ".db_escape($gl)." WHERE stock_id = ".db_escape($it[0]),
+                "could not update the item's sales account");
+            $log[] = "item $it[0]: sales GL now $gl";
         }
         bi_set("stripe_item_$k:$bank", $it[0]);
     }
