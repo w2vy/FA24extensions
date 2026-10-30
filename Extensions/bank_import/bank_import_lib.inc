@@ -184,6 +184,16 @@ function bi_match_payout($bank, $line, $taken) {
     return $find(0, $want) ? $pick : array();
 }
 
+/** The FA bank account's name (Molten Tech LLC, Paypal, ...), or "bank N" if there is none. */
+function bi_bank_name($id) {
+    static $names = array();
+    if (!isset($names[$id])) {
+        $a = get_bank_account($id);
+        $names[$id] = $a ? $a['bank_account_name'] : "bank $id";
+    }
+    return $names[$id];
+}
+
 /** A PayPal payment paid by a bank pull and booked in ANOTHER FA bank as the payment itself (eBay 2/19 -> 1/4176 in bank 8). */
 function bi_paid_elsewhere($bank, $line) {
     $p = db_escape($line['posted']);
@@ -302,14 +312,14 @@ function bi_plan($bank, $lines) {
             $cents = (string)round(abs($l['amount']) * 100);
             if ($l['amount'] > 0 && stripos($l['ptype'], 'Payment') !== false && ($e = bi_booked_elsewhere($bank, $l))) {
                 $plan['status'] = 'elsewhere';
-                $plan['note'] = "booked in bank ".$e['bank_act']." (".$e['type']."/".$e['trans_no'].")";
+                $plan['note'] = "booked in ".bi_bank_name($e['bank_act'])." (".$e['type']."/".$e['trans_no'].")";
                 $elsewhere_out[$cents] = $l['posted'];
                 $lines[$i]['plan'] = $plan;
                 continue;
             }
             if ($l['amount'] < 0 && isset($funded[$l['txid']]) && ($e = bi_paid_elsewhere($bank, $l))) {
                 $plan['status'] = 'elsewhere';
-                $plan['note'] = "paid by a bank pull, booked in bank ".$e['bank_act']." (".$e['type']."/".$e['trans_no'].")";
+                $plan['note'] = "paid by a bank pull, booked in ".bi_bank_name($e['bank_act'])." (".$e['type']."/".$e['trans_no'].")";
                 $funded_elsewhere[$l['txid']] = 1;
                 $lines[$i]['plan'] = $plan;
                 continue;
@@ -395,7 +405,7 @@ function bi_check($bank, $l, $action, $target) {
                 "branch")) ? '' : "customer $target has no branch";
         case 'transfer':
             if ($target == $bank) return "transfer to the same bank";
-            return get_bank_account($target) ? '' : "no bank account $target";
+            return get_bank_account($target) ? '' : "no bank account #$target";
     }
     return "unknown action $action";
 }

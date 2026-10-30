@@ -28,7 +28,7 @@ if (!$found) {
 }
 
 $ACTIONS = array('skip' => 'Skip (nothing in FA)', 'gl' => 'GL account #', 'supplier' => 'Supplier #',
-    'customer' => 'Customer #', 'transfer' => 'Transfer with bank #');
+    'customer' => 'Customer #');
 
 function bi_action_select($name, $selected) {
     global $ACTIONS;
@@ -37,11 +37,25 @@ function bi_action_select($name, $selected) {
         ." ORDER BY description", "quick entries");
     while ($q = db_fetch_assoc($res)) $opts['qe:'.$q['id']] = 'QE: '.$q['description'];
     $opts += $ACTIONS;
+    $opts += bi_transfer_options();
     $h = "<select name='$name'>";
     foreach ($opts as $k => $v)
         $h .= "<option value='".htmlspecialchars($k, ENT_QUOTES)."'".($k == $selected ? ' selected' : '').">"
             .htmlspecialchars($v)."</option>";
     return $h."</select>";
+}
+
+/** One "Transfer with <bank name>" choice per FA bank account (value transfer:<id>). */
+function bi_transfer_options() {
+    $opts = array();
+    $res = db_query("SELECT id, bank_account_name FROM ".TB_PREF."bank_accounts WHERE inactive = 0 ORDER BY bank_account_name", "banks");
+    while ($b = db_fetch_assoc($res)) $opts['transfer:'.$b['id']] = 'Transfer with '.$b['bank_account_name'];
+    return $opts;
+}
+
+/** The select value for an action + target (qe and transfer carry their target in the value). */
+function bi_action_value($action, $target) {
+    return ($action == 'qe' || $action == 'transfer') && $target != '' ? "$action:$target" : $action;
 }
 
 function bi_bt_text($rows) {
@@ -80,9 +94,9 @@ if ($action == 'create' && isset($_SESSION['bank_import'])) {
         if (in_array($p['status'], array('rule', 'unknown'))) {
             $act = get_post("act_$i", 'leave');
             $tgt = trim(get_post("tgt_$i"));
-            if (substr($act, 0, 3) == 'qe:') {
-                $tgt = substr($act, 3);
-                $act = 'qe';
+            if (preg_match('/^(qe|transfer):(\d+)$/', $act, $m)) {
+                $act = $m[1];
+                $tgt = $m[2];
             }
             if ($act == 'leave') continue;
             $e = bi_check($bank, $l, $act, $tgt);
@@ -125,9 +139,15 @@ if ($action == 'create' && isset($_SESSION['bank_import'])) {
 if ($action == 'rule_add') {
     if (trim(get_post('pattern')) == '' || get_post('raction') == '')
         $errors[] = "A rule needs a pattern and an action";
-    else
-        bi_add_rule(get_post('priority', 50), get_post('rbank', 0), trim(get_post('pattern')), get_post('sign', 0),
-            get_post('raction'), trim(get_post('target')));
+    else {
+        $ract = get_post('raction');
+        $rtgt = trim(get_post('target'));
+        if (preg_match('/^transfer:(\d+)$/', $ract, $m)) {
+            $ract = 'transfer';
+            $rtgt = $m[1];
+        }
+        bi_add_rule(get_post('priority', 50), get_post('rbank', 0), trim(get_post('pattern')), get_post('sign', 0), $ract, $rtgt);
+    }
     $action = 'rules';
 }
 if ($action == 'rule_del') {
@@ -212,10 +232,10 @@ if ($action == 'preview') {
         } else {
             label_cell(($p['status'] == 'rule' ? "<b>will create</b>" : "<font color=red>unknown</font>")
                 .($p['note'] != '' ? "<br><i>".htmlspecialchars($p['note'])."</i>" : ''));
-            $sel = get_post("act_$i", $p['action'] == 'qe' ? 'qe:'.$p['target'] : $p['action']);
+            $sel = get_post("act_$i", bi_action_value($p['action'], $p['target']));
             label_cell(bi_action_select("act_$i", $sel));
             label_cell("<input type='text' name='tgt_$i' size=6 value='"
-                .htmlspecialchars(get_post("tgt_$i", $p['action'] == 'qe' ? '' : $p['target']), ENT_QUOTES)."'>");
+                .htmlspecialchars(get_post("tgt_$i", in_array($p['action'], array('qe', 'transfer')) ? '' : $p['target']), ENT_QUOTES)."'>");
             label_cell($p['status'] == 'unknown' ? "<input type='checkbox' name='rem_$i' value=1>"
                 ." <input type='text' name='pat_$i' size=18 value='"
                 .htmlspecialchars(get_post("pat_$i", bi_pattern_guess($l['descr'])), ENT_QUOTES)."'>" : '');
@@ -241,11 +261,12 @@ if ($action == 'rules') {
         $n++;
         alt_table_row_color($k);
         label_cell($r['priority']);
-        label_cell($r['bank_act'] ? get_bank_account($r['bank_act'])['bank_account_name'] : 'any');
+        label_cell($r['bank_act'] ? bi_bank_name($r['bank_act']) : 'any');
         label_cell(htmlspecialchars($r['pattern']));
         label_cell($r['sign']);
         label_cell($r['action']);
-        label_cell($r['target'].($r['action'] == 'qe' && ($q = get_quick_entry($r['target'])) ? ' '.$q['description'] : ''));
+        if ($r['action'] == 'transfer') label_cell(bi_bank_name($r['target']));
+        else label_cell($r['target'].($r['action'] == 'qe' && ($q = get_quick_entry($r['target'])) ? ' '.$q['description'] : ''));
         label_cell("<a href='".$_SERVER['PHP_SELF']."?action=rule_del&id=".$r['id']."'>Delete</a>");
         end_row();
     }
@@ -265,8 +286,10 @@ if ($action == 'rules') {
     text_row("Sign (1 in, -1 out, 0 either):", 'sign', 0, 3, 3);
     label_row("Action:", "<select name='raction'><option value='qe'>quick entry</option><option value='gl'>GL account</option>"
         ."<option value='supplier'>supplier</option><option value='customer'>customer</option>"
-        ."<option value='transfer'>transfer</option><option value='payout'>payout</option><option value='skip'>skip</option></select>");
-    text_row("# (quick entry, GL, supplier, customer, bank):", 'target', '', 10, 20);
+        ."<option value='payout'>payout</option><option value='skip'>skip</option>"
+        .implode('', array_map(function ($k, $v) { return "<option value='$k'>".htmlspecialchars($v)."</option>"; },
+            array_keys(bi_transfer_options()), bi_transfer_options()))."</select>");
+    text_row("# (quick entry, GL, supplier, customer):", 'target', '', 10, 20);
     end_table(1);
     hidden('action', 'rule_add');
     submit_center('rule_add', "Add rule");
