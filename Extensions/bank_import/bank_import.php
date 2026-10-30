@@ -275,7 +275,9 @@ if ($action == 'rules') {
 }
 
 if ($action == 'reconcile') {
-    $bank = (int)get_post('bank_account', 8);
+    // Default = the bank of the last upload (PayPal after a PayPal file), else 8.
+    $last = db_fetch_row(db_query("SELECT bank_act FROM ".TB_PREF."bank_import_lines ORDER BY id DESC LIMIT 1", "last upload"));
+    $bank = (int)get_post('bank_account', $last ? $last[0] : 8);
     if (get_post('reconcile_date') == '') {
         // Default = the end of the first month not yet reconciled (or the last line, if sooner): statements go month by month.
         $r = db_fetch_row(db_query("SELECT MIN(posted), MAX(posted) FROM ".TB_PREF."bank_import_lines WHERE reconciled IS NULL AND bank_act = "
