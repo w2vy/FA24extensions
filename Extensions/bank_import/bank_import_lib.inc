@@ -521,6 +521,7 @@ function bi_starter_rules() {
     return array(
         array(10, 8, 'NSF FEE', -1, 'qe', '11'),
         array(20, 8, 'Vast.ai', 1, 'qe', '25'),
+        array(20, 8, 'Vast.ai', -1, 'gl', '4100'),       // Vast takes back a double deposit (6/5/26)
         array(20, 8, 'CLOUD.RUNONFLUX.IO', 0, 'qe', '15'),
         array(20, 8, 'WP*WOOCOMMER', 0, 'qe', '5'),
         array(20, 8, 'ANTHROPIC', 0, 'qe', '15'),
@@ -538,6 +539,7 @@ function bi_starter_rules() {
         // from tom's Jan-May 2026 bookings
         array(20, 8, 'US DENTAL DEPOT', -1, 'supplier', '22'),
         array(20, 8, 'DAL-TILE', -1, 'supplier', '4'),
+        array(20, 8, 'COVINGTON ENGINEERING', -1, 'supplier', '18'),
         array(20, 8, 'EBAY', 0, 'qe', '6'),             // 10 of 15 = Office Supplies; change the odd one in the preview
         array(20, 8, 'PADDLE.NET', -1, 'qe', '15'),
         array(20, 8, 'HRBLOCK', -1, 'gl', '5610'),
