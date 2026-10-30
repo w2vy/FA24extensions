@@ -115,8 +115,8 @@ $ST_FIELDS = array('gl' => 'Income GL account #', 'to' => 'Payouts land in (FA b
     'from' => 'Fetch from (Y-m-d, blank = all)', 'skip' => 'Payouts already booked by hand (po_..., comma separated)');
 if ($action == 'stripe_save') {
     $bank = (int)get_post('st_bank');
-    if (trim(get_post('st_key')) != '') bi_set("stripe_key:$bank", trim(get_post('st_key')));
-    if (check_value('st_clear')) bi_set("stripe_key:$bank", '');
+    // The field shows the saved key masked: unchanged stars = keep it, empty = remove it, anything else = the new key.
+    if (strpos(get_post('st_key'), '****') === false) bi_set("stripe_key:$bank", trim(get_post('st_key')));
     foreach ($ST_FIELDS as $f => $label) bi_set("stripe_$f:$bank", trim(get_post("st_$f")));
     if (bi_get("stripe_gl:$bank") != '' && !get_gl_account(bi_get("stripe_gl:$bank")))
         $errors[] = "no GL account ".bi_get("stripe_gl:$bank");
@@ -282,8 +282,7 @@ if ($action == 'stripe') {
     start_table(TABLESTYLE2);
     table_section_title(bi_bank_name($bank));
     $k = bi_get("stripe_key:$bank");
-    text_row("Stripe key".($k != '' ? " (saved: ".substr($k, 0, 8)."…; blank = keep)" : ""), 'st_key', '', 40, 200);
-    if ($k != '') check_row("Remove the saved key:", 'st_clear', 0);
+    text_row("Stripe key:", 'st_key', $k != '' ? substr($k, 0, 8).'********'.substr($k, -4) : '', 40, 200);
     foreach ($ST_FIELDS as $f => $label) {
         $_POST["st_$f"] = bi_get("stripe_$f:$bank");
         text_row("$label:", "st_$f", null, 40, 255);
