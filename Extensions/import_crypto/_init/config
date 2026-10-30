@@ -1,0 +1,14 @@
+Package: import_crypto
+Name: Import Crypto Transactions
+Description: The extension will allow importing crypto transactions in a flexible format CSV file
+ there are a few prequisites that need to be done before the import, such as setting up an innentory 
+ item with an associated GL account to track cost basis. See readme.txt for details
+Author: Tom Moulton
+Maintenance: TRom Moulton
+Homepage: gotgrit.com
+Depends: 
+InstallPath: modules/import_crypto
+Type: extension
+Filename: import_crypto-2.4.0-1
+Version: 2.4.0-1
+
