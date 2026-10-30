@@ -364,7 +364,7 @@ function bi_stripe_setup($bank) {
     return $log;
 }
 
-/** A free debtor_ref / branch_ref from a name. */
+/** A free debtor_ref / branch_ref from a name (Flux Hub ones start "FH ": they sort together, never look like a shop customer). */
 function bi_unique_ref($table, $col, $name) {
     $base = substr(trim($name) != '' ? trim($name) : 'Flux Hub', 0, 26);
     for ($n = 1; ; $n++) {
@@ -377,8 +377,9 @@ function bi_unique_ref($table, $col, $name) {
 function bi_stripe_customer($bank, $l, $create = true) {
     $area = bi_get("stripe_area:$bank");
     if ($l['cus'] != '') {
-        $r = db_fetch_row(db_query("SELECT debtor_no FROM ".TB_PREF."bank_import_customers WHERE stripe_id = "
-            .db_escape($l['cus']), "stripe customer"));
+        // Joined to the customer: an entry whose customer is gone is ignored (and replaced below).
+        $r = db_fetch_row(db_query("SELECT m.debtor_no FROM ".TB_PREF."bank_import_customers m JOIN ".TB_PREF."debtors_master d"
+            ." ON d.debtor_no = m.debtor_no WHERE m.stripe_id = ".db_escape($l['cus']), "stripe customer"));
         if ($r) $debtor = (int)$r[0];
     }
     $how = 'Stripe id';
@@ -395,11 +396,11 @@ function bi_stripe_customer($bank, $l, $create = true) {
         $sales_type = db_fetch_row(db_query("SELECT id FROM ".TB_PREF."sales_types WHERE inactive = 0 ORDER BY id LIMIT 1", "sales type"));
         $salesman = db_fetch_row(db_query("SELECT salesman_code FROM ".TB_PREF."salesman WHERE inactive = 0 ORDER BY salesman_code LIMIT 1", "salesman"));
         $loc = db_fetch_row(db_query("SELECT loc_code FROM ".TB_PREF."locations WHERE inactive = 0 ORDER BY loc_code LIMIT 1", "location"));
-        add_customer($name, bi_unique_ref('debtors_master', 'debtor_ref', $name), '', '', get_company_currency(),
+        add_customer($name, bi_unique_ref('debtors_master', 'debtor_ref', 'FH '.$name), '', '', get_company_currency(),
             bi_get("stripe_dim:$bank"), 0, 1, bi_get("stripe_terms:$bank"), 0, 0, get_company_pref('default_credit_limit'),
             $sales_type[0], "Flux Hub (Stripe)");
         $debtor = db_insert_id();
-        add_branch($debtor, $name, bi_unique_ref('cust_branch', 'branch_ref', $name), '', $salesman[0], $area,
+        add_branch($debtor, $name, bi_unique_ref('cust_branch', 'branch_ref', 'FH '.$name), '', $salesman[0], $area,
             bi_get("stripe_taxgroup:$bank"), '', get_company_pref('default_sales_discount_act'), get_company_pref('debtors_act'),
             get_company_pref('default_prompt_payment_act'), $loc[0], '', 0, 1, '', NULL);
         $branch_code = db_insert_id();
