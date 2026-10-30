@@ -111,7 +111,7 @@ if ($action == 'fetch') {
 
 // ---- Stripe settings ----------------------------------------------------------
 
-$ST_FIELDS = array('gl' => 'Income GL account #', 'to' => 'Payouts land in (FA bank #)',
+$ST_FIELDS = array('gl' => 'Income GL account', 'to' => 'Payouts land in',
     'from' => 'Fetch from (Y-m-d, blank = all)', 'skip' => 'Payouts already booked by hand (po_..., comma separated)');
 if ($action == 'stripe_save') {
     $bank = (int)get_post('st_bank');
@@ -285,7 +285,9 @@ if ($action == 'stripe') {
     text_row("Stripe key:", 'st_key', $k != '' ? substr($k, 0, 8).'********'.substr($k, -4) : '', 40, 200);
     foreach ($ST_FIELDS as $f => $label) {
         $_POST["st_$f"] = bi_get("stripe_$f:$bank");
-        text_row("$label:", "st_$f", null, 40, 255);
+        if ($f == 'gl') gl_all_accounts_list_row("$label:", 'st_gl', null, true);
+        elseif ($f == 'to') bank_accounts_list_row("$label:", 'st_to', null);
+        else text_row("$label:", "st_$f", null, 40, 255);
     }
     end_table(1);
     hidden('action', 'stripe_save');
