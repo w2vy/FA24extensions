@@ -150,6 +150,7 @@ if ($action == 'reconcile' && isset($_POST['r_reconcile'])) {
     else {
         bi_reconcile($bank, $to, $rl, $end);
         $log[] = count($rl)." statement line(s) reconciled at ".sql2date($to).", balance ".number_format($end, 2);
+        unset($_POST['reconcile_date']);    // on to the next month
     }
 }
 
@@ -296,8 +297,11 @@ if ($action == 'reconcile') {
     amount_cell($fa_rec); amount_cell($open); amount_cell($end); amount_cell($fa_after); label_cell(count($rl));
     end_row();
     end_table(1);
-    foreach ($problems as $p) display_warning($p);
-    if (!count($problems)) submit_center('r_reconcile', "Reconcile", true, false, false);
+    if (!count($rl)) display_note("Every loaded line up to ".sql2date($to)." is reconciled. Upload the next statement to go on.", 0, 1);
+    else {
+        foreach ($problems as $p) display_warning($p);
+        if (!count($problems)) submit_center('r_reconcile', "Reconcile", true, false, false);
+    }
     end_form();
     $fa = bi_fa_not_at_bank($bank, $to);
     if (count($fa)) {
