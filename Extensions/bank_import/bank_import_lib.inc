@@ -40,6 +40,9 @@ function bi_create_tables() {
     db_query("CREATE TABLE IF NOT EXISTS ".TB_PREF."bank_import_settings ("
         ." `name` varchar(60) NOT NULL, `value` text NOT NULL, PRIMARY KEY (`name`))",
         "Error creating bank_import_settings");
+    db_query("CREATE TABLE IF NOT EXISTS ".TB_PREF."bank_import_customers ("
+        ." `stripe_id` varchar(64) NOT NULL, `debtor_no` int NOT NULL, PRIMARY KEY (`stripe_id`))",
+        "Error creating bank_import_customers");
 }
 
 function bi_get($name, $default = '') {
@@ -148,23 +151,30 @@ function bi_parse($path) {
 // payouts land in), stripe_from:<bank> (Y-m-d, blank = all), stripe_skip:<bank>
 // (payout ids, comma separated, already booked by hand: they and their lines are left out).
 
+/** GET one Stripe object: [decoded body, error]. */
+function bi_stripe_get($key, $path, $query = array()) {
+    $c = curl_init('https://api.stripe.com/v1/'.$path.(count($query) ? '?'.http_build_query($query) : ''));
+    curl_setopt($c, CURLOPT_RETURNTRANSFER, 1);
+    curl_setopt($c, CURLOPT_USERPWD, $key.':');
+    curl_setopt($c, CURLOPT_TIMEOUT, 60);
+    $raw = curl_exec($c);
+    $status = curl_getinfo($c, CURLINFO_HTTP_CODE);
+    $err = $raw === false ? curl_error($c) : '';
+    curl_close($c);
+    $json = $raw === false ? null : json_decode($raw, true);
+    if ($err == '' && ($status >= 400 || !is_array($json)))
+        $err = isset($json['error']['message']) ? $json['error']['message'] : "HTTP $status";
+    return array($json, $err == '' ? '' : "Stripe $path: $err");
+}
+
 /** GET a Stripe list endpoint, every page: [rows, error]. */
 function bi_stripe_list($key, $path, $query = array()) {
     $rows = array();
     $query['limit'] = 100;
     do {
-        $c = curl_init('https://api.stripe.com/v1/'.$path.'?'.http_build_query($query));
-        curl_setopt($c, CURLOPT_RETURNTRANSFER, 1);
-        curl_setopt($c, CURLOPT_USERPWD, $key.':');
-        curl_setopt($c, CURLOPT_TIMEOUT, 60);
-        $raw = curl_exec($c);
-        $status = curl_getinfo($c, CURLINFO_HTTP_CODE);
-        $err = $raw === false ? curl_error($c) : '';
-        curl_close($c);
-        $json = $raw === false ? null : json_decode($raw, true);
-        if ($err == '' && ($status >= 400 || !isset($json['data'])))
-            $err = isset($json['error']['message']) ? $json['error']['message'] : "HTTP $status";
-        if ($err != '') return array(array(), "Stripe $path: $err");
+        list($json, $err) = bi_stripe_get($key, $path, $query);
+        if ($err == '' && !isset($json['data'])) $err = "Stripe $path: no list in the answer";
+        if ($err != '') return array(array(), $err);
         foreach ($json['data'] as $r) $rows[] = $r;
         if (count($json['data'])) $query['starting_after'] = $json['data'][count($json['data']) - 1]['id'];
     } while (!empty($json['has_more']));
@@ -173,14 +183,8 @@ function bi_stripe_list($key, $path, $query = array()) {
 
 /** Stripe's balance now (available + pending, USD), or [null, error]. */
 function bi_stripe_balance($key) {
-    $c = curl_init('https://api.stripe.com/v1/balance');
-    curl_setopt($c, CURLOPT_RETURNTRANSFER, 1);
-    curl_setopt($c, CURLOPT_USERPWD, $key.':');
-    curl_setopt($c, CURLOPT_TIMEOUT, 60);
-    $raw = curl_exec($c);
-    $json = $raw === false ? null : json_decode($raw, true);
-    if (!isset($json['available'])) return array(null, "Stripe balance: "
-        .(isset($json['error']['message']) ? $json['error']['message'] : ($raw === false ? curl_error($c) : 'no answer')));
+    list($json, $err) = bi_stripe_get($key, 'balance');
+    if ($err != '') return array(null, $err);
     $cents = 0;
     foreach (array('available', 'pending') as $k)
         foreach ($json[$k] as $b) if ($b['currency'] == 'usd') $cents += $b['amount'];
@@ -199,8 +203,13 @@ function bi_stripe_lines($bank) {
         return array(array(), "Stripe key, income GL and payout bank must all be set for ".bi_bank_name($bank)." (Stripe tab)");
     $q = array();
     if (($from = bi_get("stripe_from:$bank")) != '') $q['created[gte]'] = strtotime($from.' 00:00:00 America/New_York');
+    $q['expand[]'] = 'data.source';
     list($rows, $err) = bi_stripe_list($key, 'balance_transactions', $q);
     if ($err != '') return array(array(), $err);
+    foreach ($rows as $i => $t) if (is_array($t['source'])) {
+        $rows[$i]['src'] = $t['source'];
+        $rows[$i]['source'] = $t['source']['id'];
+    }
     list($now, $err) = bi_stripe_balance($key);
     if ($err != '') return array(array(), $err);
 
@@ -225,6 +234,7 @@ function bi_stripe_lines($bank) {
 
     $income = bi_get("stripe_gl:$bank");
     $to = bi_get("stripe_to:$bank");
+    $customers = bi_get("stripe_area:$bank") != '';   // Set up done: sales are invoiced to customers
     $tz = new DateTimeZone('America/New_York');
     $lines = array();
     foreach (array_reverse($rows) as $t) {   // Stripe lists newest first
@@ -233,15 +243,24 @@ function bi_stripe_lines($bank) {
         $d = new DateTime('@'.$t['created']);
         $d->setTimezone($tz);
         $type = $t['type'];
-        $st = array('leave', '');
-        if ($type == 'charge' || $type == 'payment') $st = array('gl', $income);
-        elseif ($type == 'refund' || $type == 'payment_refund') $st = array('gl', $income);
-        elseif ($type == 'payout') $st = array('transfer', $to);
-        elseif ($type == 'stripe_fee' || $type == 'tax_fee') $st = array('gl', get_company_pref('bank_charge_act'));
-        $lines[] = array('key' => 'ST:'.$t['id'], 'posted' => $d->format('Y-m-d'), 'tdate' => $d->format('Y-m-d'),
+        $l = array('key' => 'ST:'.$t['id'], 'posted' => $d->format('Y-m-d'), 'tdate' => $d->format('Y-m-d'),
             'descr' => substr("Stripe $type | ".$t['description']." | ".$t['source'], 0, 255),
             'amount' => round($t['net'] / 100.0, 2), 'gross' => round($t['amount'] / 100.0, 2),
-            'fee' => -round($t['fee'] / 100.0, 2), 'st' => $st);
+            'fee' => -round($t['fee'] / 100.0, 2), 'st' => array('leave', ''));
+        $sale = $type == 'charge' || $type == 'payment';
+        $refund = $type == 'refund' || $type == 'payment_refund';
+        if (($sale || $refund) && $customers) {
+            $loaded = db_fetch_row(db_query("SELECT 1 FROM ".TB_PREF."bank_import_lines WHERE bank_act = ".db_escape($bank)
+                ." AND line_key = ".db_escape($l['key']), "could not look up the line"));
+            if (!$loaded) {     // who paid and for what: only for lines not loaded yet (Stripe calls)
+                $err = bi_stripe_buyer($key, $t, $l);
+                if ($err != '') return array(array(), $err);
+            }
+            $l['st'] = array($sale ? 'stripe_sale' : 'stripe_refund', '');
+        } elseif ($sale || $refund) $l['st'] = array('gl', $income);
+        elseif ($type == 'payout') $l['st'] = array('transfer', $to);
+        elseif ($type == 'stripe_fee' || $type == 'tax_fee') $l['st'] = array('gl', get_company_pref('bank_charge_act'));
+        $lines[] = $l;
     }
     $bal = round($now - $left_out / 100.0, 2);
     for ($i = count($lines) - 1; $i >= 0; $i--) {
@@ -249,6 +268,210 @@ function bi_stripe_lines($bank) {
         $bal = round($bal - $lines[$i]['amount'], 2);
     }
     return array($lines, '');
+}
+
+/**
+ * Who paid and for what, onto the line: cus (Stripe customer), email, name, ref (charge),
+ * item = plan | rental, what (invoice text). A hub plan's invoice carries the subscription's
+ * planKey (checkout stamps it); anything else on this account is a node rental.
+ */
+function bi_stripe_buyer($key, $t, &$l) {
+    $ch = isset($t['src']) ? $t['src'] : array();
+    if (isset($ch['object']) && $ch['object'] == 'refund') {
+        list($ch, $err) = bi_stripe_get($key, 'charges/'.$ch['charge']);
+        if ($err != '') return $err;
+    }
+    if (!isset($ch['object']) || $ch['object'] != 'charge') return "$t[id]: no charge behind this $t[type]";
+    $bd = isset($ch['billing_details']) ? $ch['billing_details'] : array();
+    $l['cus'] = (string)$ch['customer'];
+    $l['email'] = !empty($bd['email']) ? $bd['email'] : (string)$ch['receipt_email'];
+    $l['name'] = !empty($bd['name']) ? $bd['name'] : '';
+    $l['ref'] = $ch['id'];
+    $l['item'] = 'rental';
+    $l['what'] = (string)$ch['description'];
+    if (!empty($ch['payment_intent'])) {
+        list($ips, $err) = bi_stripe_list($key, 'invoice_payments', array('payment[type]' => 'payment_intent',
+            'payment[payment_intent]' => $ch['payment_intent'], 'expand[]' => 'data.invoice'));
+        if ($err != '') return $err;
+        foreach ($ips as $ip) {
+            $inv = $ip['invoice'];
+            $meta = isset($inv['parent']['subscription_details']['metadata']) ? $inv['parent']['subscription_details']['metadata'] : array();
+            if (!empty($meta['planKey'])) $l['item'] = 'plan';
+            // A plan change bills "Unused time on X" (credit) + "Remaining time on Y": name the biggest line.
+            $top = null;
+            foreach ($inv['lines']['data'] as $il) if ($top === null || $il['amount'] > $top['amount']) $top = $il;
+            if ($top && !empty($top['description'])) $l['what'] = $top['description'];
+            if ($l['email'] == '' && !empty($inv['customer_email'])) $l['email'] = $inv['customer_email'];
+            if ($l['name'] == '' && !empty($inv['customer_name'])) $l['name'] = $inv['customer_name'];
+            if (!empty($meta['providerSlug'])) $l['what'] .= ' ('.$meta['providerSlug'].')';
+        }
+    }
+    return '';
+}
+
+// ---- Stripe customers, invoices, credit notes ---------------------------------
+//
+// With Set up done, each Stripe sale is a direct invoice (item FH-PLAN / FH-RENTAL, no tax,
+// dimension Flux Hub) to a customer in the Flux Hub sales area, paid at once by a customer
+// payment into the Stripe bank (fee = bank charge) and allocated to it. A refund is a credit
+// note plus a bank payment back to the customer, allocated to each other. Flux Hub customers
+// are only ever matched inside their own area, never to a shop customer with the same email.
+
+/** Create (if missing) the area, dimension, items and settings the customer posting needs. */
+function bi_stripe_setup($bank) {
+    global $Refs;
+    $log = array();
+    $gl = bi_get("stripe_gl:$bank");
+    if ($gl == '' || !get_gl_account($gl)) return array("Set the income GL first");
+    $r = db_fetch_row(db_query("SELECT area_code FROM ".TB_PREF."areas WHERE description = 'Flux Hub'", "area"));
+    if (!$r) {
+        add_sales_area('Flux Hub');
+        $r = array(db_insert_id());
+        $log[] = "sales area Flux Hub added";
+    }
+    bi_set("stripe_area:$bank", $r[0]);
+    $r = db_fetch_row(db_query("SELECT id FROM ".TB_PREF."dimensions WHERE name = 'Flux Hub'", "dimension"));
+    if (!$r) {
+        $r = array(add_dimension($Refs->get_next(ST_DIMENSION), 'Flux Hub', 1, Today(), add_years(Today(), 20), ''));
+        $log[] = "dimension Flux Hub added";
+    }
+    bi_set("stripe_dim:$bank", $r[0]);
+    $cat = db_fetch_row(db_query("SELECT category_id FROM ".TB_PREF."stock_category WHERE description = 'Services'", "category"));
+    $tax = db_fetch_row(db_query("SELECT id FROM ".TB_PREF."item_tax_types WHERE exempt = 1 ORDER BY id LIMIT 1", "tax type"));
+    if (!$cat || !$tax) return array_merge($log, array("need a stock category 'Services' and an exempt item tax type"));
+    foreach (array('plan' => array('FH-PLAN', 'Flux Hub operator plan'), 'rental' => array('FH-RENTAL', 'Flux Hub node rental')) as $k => $it) {
+        if (!get_item($it[0])) {
+            add_item($it[0], $it[1], '', $cat[0], $tax[0], 'ea', 'D', $gl, get_company_pref('default_inventory_act'),
+                get_company_pref('default_cogs_act'), get_company_pref('default_adj_act'), get_company_pref('default_wip_act'),
+                bi_get("stripe_dim:$bank"), 0, 0, 1, 1);
+            $log[] = "item $it[0] added (sales GL $gl, tax free)";
+        }
+        bi_set("stripe_item_$k:$bank", $it[0]);
+    }
+    $r = db_fetch_row(db_query("SELECT id FROM ".TB_PREF."tax_groups WHERE name = 'Exempt'", "tax group"));
+    if (!$r) return array_merge($log, array("need a tax group named Exempt"));
+    bi_set("stripe_taxgroup:$bank", $r[0]);
+    // Terms: never a cash sale (FA would book its own payment into the POS account).
+    $res = db_query("SELECT terms_indicator FROM ".TB_PREF."payment_terms WHERE inactive = 0 ORDER BY days_before_due DESC, terms_indicator", "terms");
+    while ($t = db_fetch_row($res)) {
+        $pt = get_payment_terms($t[0]);
+        if (!$pt['cash_sale']) {
+            bi_set("stripe_terms:$bank", $t[0]);
+            break;
+        }
+    }
+    $log[] = "Set up done for ".bi_bank_name($bank);
+    return $log;
+}
+
+/** A free debtor_ref / branch_ref from a name. */
+function bi_unique_ref($table, $col, $name) {
+    $base = substr(trim($name) != '' ? trim($name) : 'Flux Hub', 0, 26);
+    for ($n = 1; ; $n++) {
+        $ref = $n == 1 ? $base : "$base $n";
+        if (!db_num_rows(db_query("SELECT 1 FROM ".TB_PREF."$table WHERE $col = ".db_escape($ref), "ref"))) return $ref;
+    }
+}
+
+/** The Flux Hub customer for this line: [debtor_no, branch row, how found]; created if new (debtor 0 when $create is false). */
+function bi_stripe_customer($bank, $l, $create = true) {
+    $area = bi_get("stripe_area:$bank");
+    if ($l['cus'] != '') {
+        $r = db_fetch_row(db_query("SELECT debtor_no FROM ".TB_PREF."bank_import_customers WHERE stripe_id = "
+            .db_escape($l['cus']), "stripe customer"));
+        if ($r) $debtor = (int)$r[0];
+    }
+    $how = 'Stripe id';
+    if (empty($debtor) && $l['email'] != '') {
+        $r = db_fetch_row(db_query("SELECT B.debtor_no FROM ".TB_PREF."crm_persons P JOIN ".TB_PREF."crm_contacts C"
+            ." ON C.person_id = P.id AND C.type = 'customer' JOIN ".TB_PREF."cust_branch B ON B.debtor_no = C.entity_id"
+            ." WHERE P.email = ".db_escape($l['email'])." AND B.area = ".db_escape($area)." LIMIT 1", "customer by email"));
+        if ($r) $debtor = (int)$r[0];
+        $how = 'email';
+    }
+    if (empty($debtor) && !$create) return array(0, null, 'new');
+    if (empty($debtor)) {
+        $name = $l['name'] != '' ? $l['name'] : ($l['email'] != '' ? $l['email'] : $l['cus']);
+        $sales_type = db_fetch_row(db_query("SELECT id FROM ".TB_PREF."sales_types WHERE inactive = 0 ORDER BY id LIMIT 1", "sales type"));
+        $salesman = db_fetch_row(db_query("SELECT salesman_code FROM ".TB_PREF."salesman WHERE inactive = 0 ORDER BY salesman_code LIMIT 1", "salesman"));
+        $loc = db_fetch_row(db_query("SELECT loc_code FROM ".TB_PREF."locations WHERE inactive = 0 ORDER BY loc_code LIMIT 1", "location"));
+        add_customer($name, bi_unique_ref('debtors_master', 'debtor_ref', $name), '', '', get_company_currency(),
+            bi_get("stripe_dim:$bank"), 0, 1, bi_get("stripe_terms:$bank"), 0, 0, get_company_pref('default_credit_limit'),
+            $sales_type[0], "Flux Hub (Stripe)");
+        $debtor = db_insert_id();
+        add_branch($debtor, $name, bi_unique_ref('cust_branch', 'branch_ref', $name), '', $salesman[0], $area,
+            bi_get("stripe_taxgroup:$bank"), '', get_company_pref('default_sales_discount_act'), get_company_pref('debtors_act'),
+            get_company_pref('default_prompt_payment_act'), $loc[0], '', 0, 1, '', NULL);
+        $branch_code = db_insert_id();
+        $person = add_crm_person($name, $name, '', '', '', '', '', $l['email'], '', '');
+        add_crm_contact('cust_branch', 'general', $branch_code, $person);
+        add_crm_contact('customer', 'general', $debtor, $person);
+        $how = 'new';
+    }
+    if (!$create) return array($debtor, null, $how);
+    if ($l['cus'] != '')
+        db_query("REPLACE INTO ".TB_PREF."bank_import_customers (stripe_id, debtor_no) VALUES (".db_escape($l['cus'])
+            .", ".(int)$debtor.")", "could not remember the Stripe customer");
+    $branch = db_fetch_assoc(db_query("SELECT * FROM ".TB_PREF."cust_branch WHERE debtor_no = ".(int)$debtor
+        ." ORDER BY branch_code LIMIT 1", "branch"));
+    return array($debtor, $branch, $how);
+}
+
+/** A direct invoice (sale) or free-hand credit note (refund) of one Flux Hub item: its trans_no. */
+function bi_stripe_document($bank, $type, $debtor, $branch, $l) {
+    $cust = get_customer($debtor);
+    $date = sql2date($l['posted']);
+    $cart = new Cart($type);
+    $cart->set_customer($debtor, $cust['name'], $cust['curr_code'], 0, $cust['payment_terms']);
+    $cart->document_date = $date;
+    $cart->due_date = $date;
+    $cart->sales_type = $cust['sales_type'];
+    $st = get_sales_type($cust['sales_type']);
+    $cart->tax_included = $st['tax_included'];
+    $cart->price_factor = $st['factor'];
+    $cart->ship_via = $branch['default_ship_via'] ? $branch['default_ship_via'] : 1;
+    $cart->deliver_to = $branch['br_name'];
+    $cart->delivery_address = $branch['br_address'];
+    $cart->set_branch($branch['branch_code'], $branch['tax_group_id'], '', '', $l['email']);
+    $cart->Location = $branch['default_location'];
+    $cart->freight_cost = 0;
+    $cart->cust_ref = 'Stripe '.$l['ref'];
+    $cart->Comments = 'BANK: '.$l['descr'];
+    $cart->dimension_id = bi_get("stripe_dim:$bank");
+    add_to_order($cart, bi_get("stripe_item_".$l['item'].":$bank"), 1, abs($l['gross']), 0, $l['what'] != '' ? $l['what'] : null);
+    return $cart->write(0);
+}
+
+function bi_stripe_allocate($amount, $from_type, $from_no, $to_type, $to_no, $debtor, $date) {
+    add_cust_allocation($amount, $from_type, $from_no, $to_type, $to_no, $debtor, $date);
+    update_debtor_trans_allocation($to_type, $to_no, $debtor);
+    update_debtor_trans_allocation($from_type, $from_no, $debtor);
+}
+
+/** Post a Stripe sale or refund to its customer; returns the bank_trans id in the Stripe bank. */
+function bi_stripe_post($bank, $l, $action) {
+    global $Refs;
+    list($debtor, $branch) = bi_stripe_customer($bank, $l);
+    $date = sql2date($l['posted']);
+    $memo = 'BANK: '.$l['descr'];
+    $dim = bi_get("stripe_dim:$bank");
+    if ($action == 'stripe_sale') {
+        $inv = bi_stripe_document($bank, ST_SALESINVOICE, $debtor, $branch, $l);
+        $ref = $Refs->get_next(ST_CUSTPAYMENT, null, array('customer' => $debtor, 'branch' => $branch['branch_code'], 'date' => $date));
+        $pay = write_customer_payment(0, $debtor, $branch['branch_code'], $bank, $date, $ref, $l['gross'], 0, $memo, 0, -$l['fee'], 0, $dim, 0);
+        bi_stripe_allocate($l['gross'], ST_CUSTPAYMENT, $pay, ST_SALESINVOICE, $inv, $debtor, $date);
+        return bi_bank_trans_id($bank, ST_CUSTPAYMENT, $pay);
+    }
+    $amt = abs($l['gross']);
+    $cn = bi_stripe_document($bank, ST_CUSTCREDIT, $debtor, $branch, $l);
+    $cart = new items_cart(ST_BANKPAYMENT);
+    $cart->tran_date = $date;
+    $cart->add_gl_item($branch['receivables_account'], $dim, 0, $amt, $memo);
+    $ref = $Refs->get_next(ST_BANKPAYMENT, null, $date);
+    list($t, $no) = write_bank_transaction(ST_BANKPAYMENT, 0, $bank, $cart, $date, PT_CUSTOMER, $debtor, $branch['branch_code'],
+        $ref, $memo, true, null);
+    bi_stripe_allocate($amt, ST_CUSTCREDIT, $cn, ST_BANKPAYMENT, $no, $debtor, $date);
+    return bi_bank_trans_id($bank, $t, $no);
 }
 
 // ---- matching ---------------------------------------------------------------
@@ -470,6 +693,13 @@ function bi_plan($bank, $lines) {
                 $plan['action'] = $l['st'][0];
                 $plan['target'] = $l['st'][1];
                 $plan['note'] = "Stripe ".($l['st'][0] == 'transfer' ? 'payout' : 'type');
+                if (substr($l['st'][0], 0, 7) == 'stripe_') {
+                    list($d, , $how) = bi_stripe_customer($bank, $l, false);
+                    $who = ($l['name'] != '' ? $l['name'].' ' : '').'<'.$l['email'].'>';
+                    $plan['note'] = ($l['st'][0] == 'stripe_sale' ? 'invoice + payment' : 'credit note + refund')
+                        .": ".strtoupper($l['item'])." \"".$l['what']."\" to $who"
+                        .($d ? " (customer $d, by $how)" : " (new Flux Hub customer)");
+                }
             } else
                 $plan['note'] = "Stripe type not known: pick by hand";
             $lines[$i]['plan'] = $plan;
@@ -540,6 +770,13 @@ function bi_check($bank, $l, $action, $target) {
             if (!get_customer($target)) return "no customer $target";
             return db_num_rows(db_query("SELECT 1 FROM ".TB_PREF."cust_branch WHERE debtor_no = ".db_escape($target),
                 "branch")) ? '' : "customer $target has no branch";
+        case 'stripe_sale':
+        case 'stripe_refund':
+            if (!isset($l['item'])) return "not a Stripe sale or refund";
+            foreach (array('area', 'dim', 'taxgroup', 'item_'.$l['item']) as $k)
+                if (bi_get("stripe_$k:$bank") == '') return "Stripe Set up not done ($k)";
+            if (($action == 'stripe_sale') != ($l['gross'] > 0)) return "a sale must be money in, a refund money out";
+            return '';
         case 'transfer':
             if ($target == $bank) return "transfer to the same bank";
             return get_bank_account($target) ? '' : "no bank account #$target";
@@ -559,6 +796,7 @@ function bi_post($bank, $l, $action, $target) {
     $fee = isset($l['fee']) ? $l['fee'] : 0;
 
     if ($action == 'skip') return 0;
+    if ($action == 'stripe_sale' || $action == 'stripe_refund') return bi_stripe_post($bank, $l, $action);
     if ($action == 'qe' || $action == 'gl') {
         $type = $amt < 0 ? ST_BANKPAYMENT : ST_BANKDEPOSIT;
         $cart = new items_cart($type);

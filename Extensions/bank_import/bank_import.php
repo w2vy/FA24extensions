@@ -17,6 +17,11 @@ include_once($path_to_root . "/gl/includes/gl_db.inc");
 include_once($path_to_root . "/sales/includes/sales_db.inc");
 include_once($path_to_root . "/purchasing/includes/purchasing_db.inc");
 include_once($path_to_root . "/admin/db/fiscalyears_db.inc");
+include_once($path_to_root . "/sales/includes/cart_class.inc");
+include_once($path_to_root . "/sales/includes/ui/sales_order_ui.inc");
+include_once($path_to_root . "/sales/includes/db/sales_groups_db.inc");
+include_once($path_to_root . "/inventory/includes/db/items_db.inc");
+include_once($path_to_root . "/dimensions/includes/dimensions_db.inc");
 include_once($path_to_root . "/modules/bank_import/bank_import_lib.inc");
 
 $action = isset($_GET['action']) ? $_GET['action'] : 'upload';
@@ -42,6 +47,9 @@ function bi_action_select($name, $selected) {
     while ($q = db_fetch_assoc($res)) $opts['qe:'.$q['id']] = 'QE: '.$q['description'];
     $opts += $ACTIONS;
     $opts += bi_transfer_options();
+    if ($selected == 'stripe_sale' || $selected == 'stripe_refund')     // only on Stripe lines
+        $opts = array($selected => $selected == 'stripe_sale' ? 'Invoice + payment (Flux Hub customer)'
+            : 'Credit note + refund (Flux Hub customer)') + $opts;
     $h = "<select name='$name'>";
     foreach ($opts as $k => $v)
         $h .= "<option value='".htmlspecialchars($k, ENT_QUOTES)."'".($k == $selected ? ' selected' : '').">"
@@ -115,6 +123,13 @@ if ($action == 'stripe_save') {
     if (bi_get("stripe_to:$bank") != '' && !get_bank_account(bi_get("stripe_to:$bank")))
         $errors[] = "no bank account #".bi_get("stripe_to:$bank");
     if (!count($errors)) $log[] = "Stripe settings saved for ".bi_bank_name($bank);
+    $action = 'stripe';
+}
+if ($action == 'stripe_setup') {
+    $bank = (int)get_post('st_bank');
+    begin_transaction();
+    $log = bi_stripe_setup($bank);
+    commit_transaction();
     $action = 'stripe';
 }
 
@@ -276,6 +291,20 @@ if ($action == 'stripe') {
     end_table(1);
     hidden('action', 'stripe_save');
     submit_center('stripe_save', "Save");
+    end_form();
+    // Customers: what Set up made (or found).
+    start_form();
+    hidden('st_bank', $bank);
+    start_table(TABLESTYLE2);
+    table_section_title("Customers (sales invoiced to Flux Hub customers)");
+    foreach (array('area' => 'Sales area', 'dim' => 'Dimension', 'item_plan' => 'Plan item', 'item_rental' => 'Rental item',
+        'taxgroup' => 'Tax group', 'terms' => 'Payment terms') as $f => $label)
+        label_row("$label:", bi_get("stripe_$f:$bank") != '' ? bi_get("stripe_$f:$bank") : '<i>not set</i>');
+    end_table(1);
+    display_note("Set up adds the sales area and dimension \"Flux Hub\", items FH-PLAN / FH-RENTAL (income GL, tax free)"
+        ." and uses tax group Exempt. Until it is done, sales go straight to the income GL with no customer.", 0, 1);
+    hidden('action', 'stripe_setup');
+    submit_center('stripe_setup', "Set up");
     end_form();
     end_page();
 }
