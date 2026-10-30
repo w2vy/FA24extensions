@@ -140,11 +140,11 @@ function bi_free_bank_trans_sql($bank, $taken) {
 }
 
 /** The FA bank transaction for this line: same amount, FA date from 7 days before to 3 after; closest date wins. */
-function bi_match_one($bank, $line, $taken) {
+function bi_match_one($bank, $line, $taken, $before = 7, $after = 3) {
     $p = db_escape($line['posted']);
     $sql = bi_free_bank_trans_sql($bank, $taken)
         ." AND ROUND(b.amount, 2) = ".round($line['amount'], 2)
-        ." AND b.trans_date BETWEEN DATE_SUB($p, INTERVAL 7 DAY) AND DATE_ADD($p, INTERVAL 3 DAY)"
+        ." AND b.trans_date BETWEEN DATE_SUB($p, INTERVAL ".(int)$before." DAY) AND DATE_ADD($p, INTERVAL ".(int)$after." DAY)"
         ." ORDER BY ABS(DATEDIFF(b.trans_date, $p)), b.id";
     $res = db_query($sql, "could not look for a matching bank transaction");
     $all = array();
@@ -262,6 +262,19 @@ function bi_plan($bank, $lines) {
         if (isset($l['txid']) && stripos($l['ptype'], 'Bank Deposit to PP') === 0 && $l['reftx'] != '')
             $funded[$l['reftx']] = $i;
     $funded_elsewhere = array();
+    // Matching takes two passes over the whole file: first every line's match in the usual window,
+    // then a wide one (+-35 days) for the rest, so a late or early FA date (Duke booked 6/17, paid 7/2;
+    // ULine booked 8/14, paid 8/6) isn't created twice, and a monthly repeat keeps its own month.
+    $near = array();
+    foreach ($lines as $i => $l) {
+        if (db_fetch_row(db_query("SELECT 1 FROM ".TB_PREF."bank_import_lines WHERE bank_act = ".db_escape($bank)
+            ." AND line_key = ".db_escape($l['key']), "could not look up the line"))) continue;
+        $one = bi_match_one($bank, $l, $taken);
+        if (count($one)) {
+            $near[$i] = $one;
+            $taken[$one[0]['id']] = 1;
+        }
+    }
     foreach ($lines as $i => $l) {
         $plan = array('status' => 'unknown', 'note' => '', 'bt' => array(), 'action' => 'leave', 'target' => '');
         $known = db_fetch_row(db_query("SELECT status FROM ".TB_PREF."bank_import_lines WHERE bank_act = "
@@ -272,12 +285,16 @@ function bi_plan($bank, $lines) {
             $lines[$i]['plan'] = $plan;
             continue;
         }
-        $one = bi_match_one($bank, $l, $taken);
+        $one = isset($near[$i]) ? $near[$i] : bi_match_one($bank, $l, $taken, 35, 35);
         if (count($one)) {
             $plan['status'] = 'matched';
             $plan['bt'] = array($one[0]);
             $taken[$one[0]['id']] = 1;
-            if (count($one) > 1) $plan['note'] = (count($one) - 1)." other(s) with the same amount; closest date used";
+            $days = (strtotime($one[0]['trans_date']) - strtotime($l['posted'])) / 86400;
+            $notes = array();
+            if (!isset($near[$i])) $notes[] = "FA date is ".abs(round($days))." days ".($days < 0 ? "before" : "after")." the bank's: check it is the same one";
+            if (count($one) > 1) $notes[] = (count($one) - 1)." other(s) with the same amount; closest date used";
+            $plan['note'] = implode('; ', $notes);
             $lines[$i]['plan'] = $plan;
             continue;
         }
