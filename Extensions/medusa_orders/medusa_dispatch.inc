@@ -22,6 +22,10 @@ include_once($path_to_root . "/sales/includes/sales_db.inc");
 include_once($path_to_root . "/sales/includes/db/custalloc_db.inc");
 include_once($path_to_root . "/manufacturing/includes/manufacturing_db.inc");
 include_once($path_to_root . "/admin/db/fiscalyears_db.inc");
+include_once($path_to_root . "/gl/includes/db/gl_journal.inc");
+
+/** Payment vs invoice gaps up to this much are FA's tax rounding, booked to sales tax. */
+$MEDUSA_TAX_CENTS = 0.02;
 include_once($path_to_root . "/inventory/includes/inventory_db.inc");
 
 /** First sales order number to dispatch; 0 = off. */
@@ -156,8 +160,56 @@ function medusa_opens_text($opens) {
 }
 
 /**
+ * FA works the invoice tax out on the order total; the shop charged its own
+ * (per line, and per payment when freight came later), so the payments can
+ * miss the invoice by a cent. The cent IS tax (the customer paid the shop's
+ * tax): one journal between the customer and the invoice's sales tax account,
+ * allocated, so the customer ends at 0. $diff = paid - invoice. Returns the
+ * journal number, or 0 when the invoice has no tax to put it on.
+ */
+function medusa_tax_cent($so, $invoice, $diff, $ref, $date) {
+    global $Refs;
+    $tax = db_fetch_row(db_query("SELECT tt.sales_gl_code FROM ".TB_PREF."trans_tax_details d"
+        ." JOIN ".TB_PREF."tax_types tt ON tt.id = d.tax_type_id"
+        ." WHERE d.trans_type = ".ST_SALESINVOICE." AND d.trans_no = ".db_escape($invoice)." AND d.amount <> 0"
+        ." ORDER BY d.amount DESC LIMIT 1", "invoice tax account"));
+    $ar = db_fetch_row(db_query("SELECT receivables_account FROM ".TB_PREF."cust_branch"
+        ." WHERE branch_code = ".db_escape($so['branch_code']), "customer AR account"));
+    if (!$tax || !$ar) return 0;
+
+    // Overpaid: the customer is charged the cent (AR debit), tax gets it.
+    // Underpaid: the customer is credited the cent, tax gives it up.
+    $cart = new items_cart(ST_JOURNAL);
+    $cart->tran_date = $cart->doc_date = $cart->event_date = $date;
+    $cart->reference = $Refs->get_next(ST_JOURNAL, null, $date);
+    $cart->memo_ = "$ref: FA tax rounding vs shop charge";
+    $cart->source_ref = $ref;
+    $cart->add_gl_item($ar[0], 0, 0, $diff, $ref, null, $so['debtor_no']);
+    $cart->add_gl_item($tax[0], 0, 0, -$diff, $ref);
+    $jnl = write_journal_entries($cart);
+
+    if ($diff > 0) {
+        // The payment's free cent pays the journal.
+        $p = db_fetch_row(db_query("SELECT t.trans_no FROM ".TB_PREF."debtor_trans t"
+            ." JOIN ".TB_PREF."comments c ON c.type = t.type AND c.id = t.trans_no"
+            ." WHERE t.type = ".ST_CUSTPAYMENT." AND t.debtor_no = ".db_escape($so['debtor_no'])
+            ." AND c.memo_ LIKE ".db_escape($ref.' %')
+            ." AND ROUND(t.ov_amount + t.ov_discount - t.alloc, 2) >= ".db_escape($diff)
+            ." ORDER BY t.tran_date DESC, t.trans_no DESC LIMIT 1", "payment with the cent"));
+        add_cust_allocation($diff, ST_CUSTPAYMENT, $p[0], ST_JOURNAL, $jnl, $so['debtor_no'], $date);
+        update_debtor_trans_allocation(ST_CUSTPAYMENT, $p[0], $so['debtor_no']);
+    } else {
+        add_cust_allocation(-$diff, ST_JOURNAL, $jnl, ST_SALESINVOICE, $invoice, $so['debtor_no'], $date);
+        update_debtor_trans_allocation(ST_SALESINVOICE, $invoice, $so['debtor_no']);
+    }
+    update_debtor_trans_allocation(ST_JOURNAL, $jnl, $so['debtor_no']);
+    return $jnl;
+}
+
+/**
  * Posts one order in one transaction: cartons opened, work orders, delivery,
- * invoice, allocation. Returns [ok, text, warning or ''].
+ * invoice, allocation (a tax-rounding cent squared by medusa_tax_cent).
+ * Returns [ok, text, warning or ''].
  */
 function medusa_dispatch_order($so, $wos, $opens = array()) {
     global $Refs;
@@ -213,15 +265,22 @@ function medusa_dispatch_order($so, $wos, $opens = array()) {
         $left = round($left - $amt, 2);
     }
     update_debtor_trans_allocation(ST_SALESINVOICE, $invoice, $so['debtor_no']);
+
+    global $MEDUSA_TAX_CENTS;
+    $total = round((float)$inv['Total'], 2);
+    $diff = round($paid - $total, 2);
+    $jnl = 0;
+    if ($diff != 0 && abs($diff) <= $MEDUSA_TAX_CENTS + 0.0001)
+        $jnl = medusa_tax_cent($so, $invoice, $diff, $ref, $today);
     commit_transaction();
 
-    $total = round((float)$inv['Total'], 2);
-    $warn = abs($paid - $total) < 0.005 ? '' : "$ref (SO {$so['order_no']}, invoice $invoice): invoice \$"
+    $warn = abs($paid - $total) < 0.005 || $jnl ? '' : "$ref (SO {$so['order_no']}, invoice $invoice): invoice \$"
         .number_format($total, 2).", payment(s) \$".number_format($paid, 2)."; "
         .($paid < $total ? "invoice \$".number_format($total - $paid, 2)." left open"
             : "payment \$".number_format($paid - $total, 2)." left unallocated");
     return array(true, "$ref (SO {$so['order_no']}) dispatched: delivery $delivery, invoice $invoice dated $inv_date \$"
-        .number_format($total, 2).(count($opens) ? '; opened '.medusa_opens_text($opens) : '')
+        .number_format($total, 2).($jnl ? "; tax rounding \$".number_format($diff, 2)." to sales tax (journal $jnl)" : '')
+        .(count($opens) ? '; opened '.medusa_opens_text($opens) : '')
         .(count($made) ? '; made '.implode(', ', $made) : ''), $warn);
 }
 
