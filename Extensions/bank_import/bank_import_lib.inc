@@ -76,7 +76,8 @@ function bi_mdy($s) {
 /**
  * The statement lines of a Suncoast or PayPal CSV, oldest first:
  * [key, posted (Y-m-d), tdate, descr, amount (the bank's change), balance,
- *  and for PayPal: gross, fee, email, ptype, txid, reftx]. Returns [lines, error].
+ *  and for PayPal: gross, fee, email, ptype, txid, reftx]. Returns [lines, error, pending]:
+ * pending = Suncoast lines still pending (Balance 0.00 at the newest end), left out.
  * The running balance must chain (each Balance = the one before + amount):
  * a break means a missing or reordered line, and nothing is loaded.
  */
@@ -96,6 +97,7 @@ function bi_parse($path) {
     $f = function ($r, $name) use ($col) { return isset($col[$name], $r[$col[$name]]) ? trim($r[$col[$name]]) : ''; };
 
     $lines = array();
+    $pending = array();
     if (isset($col['Posted Date'], $col['Description'], $col['Balance'])) {
         // Suncoast: newest first.
         foreach (array_reverse($rows) as $r) {
@@ -107,6 +109,16 @@ function bi_parse($path) {
             $lines[] = array('key' => sha1("$posted|$descr|".number_format($amount, 2, '.', '')."|".number_format($balance, 2, '.', '')),
                 'posted' => $posted, 'tdate' => bi_mdy($f($r, 'Transaction Date')), 'descr' => $descr,
                 'amount' => $amount, 'balance' => $balance);
+        }
+        // Pending lines: Sunnet lists them newest (top of the file) with Balance $0.00.
+        // Drop them from the newest end while the 0.00 does not follow from the line before;
+        // they come back with a real balance once posted.
+        while (count($lines) > 1) {
+            $n = count($lines) - 1;
+            if (abs($lines[$n]['balance']) > 0.004
+                || abs(round($lines[$n - 1]['balance'] + $lines[$n]['amount'], 2)) <= 0.004) break;
+            $l = array_pop($lines);
+            $pending[] = $l['posted']." ".$l['descr']." ".number_format($l['amount'], 2);
         }
     } elseif (isset($col['Transaction ID'], $col['Net'], $col['Balance'])) {
         // PayPal "Balance affecting": completed rows only; Memo rows don't move the balance.
@@ -140,7 +152,7 @@ function bi_parse($path) {
                 ." = ".number_format($want, 2).", file says ".number_format($lines[$i]['balance'], 2)
                 .". A line is missing or out of order; nothing loaded.");
     }
-    return array($lines, '');
+    return array($lines, '', $pending);
 }
 
 // ---- Stripe (Flux Hub) ------------------------------------------------------

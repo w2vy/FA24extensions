@@ -87,7 +87,9 @@ if ($action == 'preview') {
         $errors[] = "No CSV file selected";
         $action = 'upload';
     } else {
-        list($lines, $err) = bi_parse($_FILES['imp']['tmp_name']);
+        $parsed = bi_parse($_FILES['imp']['tmp_name']);
+        list($lines, $err) = $parsed;
+        if ($err == '' && isset($parsed[2])) foreach ($parsed[2] as $p) $log[] = "Pending at the bank, left out (comes in on a later file): $p";
         if ($err != '') {
             $errors[] = $err;
             $action = 'upload';
