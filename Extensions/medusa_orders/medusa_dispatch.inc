@@ -207,6 +207,45 @@ function medusa_tax_cent($so, $invoice, $diff, $ref, $date) {
 }
 
 /**
+ * Opens $n sealed $carton into $bqty of $bulk at $loc: one inventory adjustment,
+ * −n carton / +bqty bulk; the bulk takes over the carton's value exactly.
+ * The caller holds the transaction. Returns the adjustment's trans no.
+ */
+function medusa_post_open($carton, $n, $bulk, $bqty, $loc, $date, $memo) {
+    global $Refs;
+    $cost = get_unit_cost($carton);
+    $items = array(new line_item($carton, -$n, $cost, ''), new line_item($bulk, $bqty, round($cost * $n / $bqty, 6), ''));
+    return add_stock_adjustment($items, $loc, $date, $Refs->get_next(ST_INVADJUST, null, $date), $memo);
+}
+
+/** Sealed cartons of $carton at $loc that can be opened: on hand less every undelivered box. */
+function medusa_openable($carton, $loc) {
+    return max(0, floor(max(0.0, medusa_qoh($carton, $loc)) - medusa_undelivered($carton, $loc) + 0.000001));
+}
+
+/**
+ * Opens cartons by hand (the Open Carton tab): for jars made in FA while the
+ * bulk is short. Same posting as auto-dispatch. Returns [ok, text, adjustment trans no].
+ */
+function medusa_open_carton($carton, $n) {
+    $cartons = medusa_cartons();
+    if (!isset($cartons[$carton])) return array(false, "$carton is not a carton (Configuration: cartons)");
+    $n = (int)$n;
+    if ($n < 1) return array(false, "Cartons to open must be a whole number, 1 or more");
+    $loc = medusa_get('location', 'DEF');
+    $can = medusa_openable($carton, $loc);
+    if ($n > $can) return array(false, "Only $can sealed $carton can be opened at $loc (on hand less boxes waiting on orders)");
+    $today = Today();
+    if (!medusa_date_open($today)) return array(false, "$today is not in an open fiscal year");
+    list($bulk, $per) = $cartons[$carton];
+    $bqty = round($n * $per, 6);
+    begin_transaction();
+    $no = medusa_post_open($carton, $n, $bulk, $bqty, $loc, $today, "Opened $n $carton into $bqty $bulk (by hand)");
+    commit_transaction();
+    return array(true, "Opened $n $carton into $bqty $bulk", $no);
+}
+
+/**
  * Posts one order in one transaction: cartons opened, work orders, delivery,
  * invoice, allocation (a tax-rounding cent squared by medusa_tax_cent).
  * Returns [ok, text, warning or ''].
@@ -221,13 +260,9 @@ function medusa_dispatch_order($so, $wos, $opens = array()) {
     $who = array('customer' => $so['debtor_no'], 'branch' => $so['branch_code']);
 
     begin_transaction();
-    // Open cartons: the bulk takes over the carton's value exactly.
     foreach ($opens as $o) {
         list($carton, $n, $bulk, $bqty, $loc) = $o;
-        $cost = get_unit_cost($carton);
-        $items = array(new line_item($carton, -$n, $cost, ''), new line_item($bulk, $bqty, round($cost * $n / $bqty, 6), ''));
-        add_stock_adjustment($items, $loc, $today, $Refs->get_next(ST_INVADJUST, null, $today),
-            "Auto-dispatch $ref: opened $n $carton into $bqty $bulk");
+        medusa_post_open($carton, $n, $bulk, $bqty, $loc, $today, "Auto-dispatch $ref: opened $n $carton into $bqty $bulk");
     }
     $made = array();
     foreach ($wos as $w) {
