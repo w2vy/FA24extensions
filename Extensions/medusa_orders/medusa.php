@@ -109,9 +109,19 @@ if ($action == 'd_dispatch') {
     $action = 'dispatch';
 }
 
+$open_result = null;
+if ($action == 'c_open') {
+    $open_result = medusa_open_carton(get_post('carton'), get_post('ncartons'));
+    // Done: reload as a GET, so a browser refresh can't open another carton.
+    if ($open_result[0]) meta_forward($_SERVER['PHP_SELF'], "action=cartons&adj=".$open_result[2]);
+    $action = 'cartons';
+}
+if ($action == 'cartons' && isset($_GET['adj']) && (int)$_GET['adj'] > 0)
+    $open_result = array(true, "Carton opened: adjustment ".get_trans_view_str(ST_INVADJUST, (int)$_GET['adj']));
+
 page("Medusa Shop Interface");
 $tabs = array('summary' => 'Summary', 'show' => 'Configuration', 'oimport' => 'Order Import',
-    'push' => 'Price + Stock Push', 'dispatch' => 'Dispatch');
+    'push' => 'Price + Stock Push', 'dispatch' => 'Dispatch', 'cartons' => 'Open Carton');
 $sep = '';
 foreach ($tabs as $a => $label) {
     echo $sep;
@@ -273,5 +283,46 @@ if ($action == 'dispatch') {
         submit_center('d_dispatch', "Dispatch Now");
         end_form();
     }
+    end_page();
+}
+
+// Open sealed cartons into bulk by hand, e.g. before making jars in FA while the
+// bulk is short (auto-dispatch opens them by itself for shop orders).
+if ($action == 'cartons') {
+    if ($open_result) {
+        if ($open_result[0]) display_notification($open_result[1]);
+        else display_error($open_result[1]);
+    }
+    $loc = medusa_get('location', 'DEF');
+    $cartons = medusa_cartons();
+    display_note("Sealed cartons at $loc (Configuration: cartons). Opening posts one inventory adjustment: −N carton, +N × size bulk at the carton's cost. Boxes waiting on undelivered orders are never opened.", 0, 1);
+    start_table(TABLESTYLE);
+    table_header(array("Carton", "Opens into", "Sealed", "Waiting as boxes", "Can open", "Bulk on hand"));
+    $k = 0;
+    $choices = array();
+    foreach ($cartons as $carton => $c) {
+        $can = medusa_openable($carton, $loc);
+        alt_table_row_color($k);
+        label_cell($carton);
+        label_cell($c[0]." × ".round($c[1], 4));
+        qty_cell(max(0.0, medusa_qoh($carton, $loc)), false, 0);
+        qty_cell(medusa_undelivered($carton, $loc), false, 0);
+        qty_cell($can, false, 0);
+        qty_cell(medusa_qoh($c[0], $loc), false, 2);
+        end_row();
+        if ($can >= 1) $choices[$carton] = "$carton → ".round($c[1], 4)." ".$c[0]." ($can sealed)";
+    }
+    if (!count($cartons)) label_row("", "No cartons set under Configuration.", "colspan=5");
+    end_table(1);
+    if (count($choices)) {
+        start_form(true);
+        start_table(TABLESTYLE2);
+        array_selector_row("Carton:", 'carton', null, $choices);
+        text_row("Cartons to open:", 'ncartons', '1', 5, 5);
+        end_table(1);
+        hidden('action', 'c_open');
+        submit_center('c_open', "Open Carton");
+        end_form();
+    } else if (count($cartons)) display_note("No sealed carton can be opened.", 0, 1);
     end_page();
 }
