@@ -4,10 +4,12 @@
 # Config ~/.config/medusa-sync.env (mode 600): FA_URL FA_USER FA_PASS MAIL_TO.
 # Mails each error the first time it shows, then once a day while it lasts.
 # A 502/503/504/52x from the shop (dev backend mid-rebuild, a Cloudflare blip)
-# is mailed only when the next run hits it again.
+# or an HTTP/2 stream reset is mailed only when the next run hits it again.
 # ROUTE: the shop URL (www, through Cloudflare) failed and FA used the Flux
 # address instead; mailed after ROUTE_MAIL_AFTER runs in a row (default 3),
 # with one more mail when the shop URL works again.
+# LOW: items at or below their FA reorder level, mailed as one list when an
+# item joins it, then once a day while any is low.
 set -u
 . "$HOME/.config/medusa-sync.env"
 STATE="$HOME/.local/state/medusa-sync"
@@ -44,17 +46,22 @@ fi
 # 502 would count as "seen twice" below.
 errors=$(printf '%s\n' "$errors" | sed '/^$/d' | awk '!seen[$0]++')
 
+lows=$(printf '%s\n' "$out" | grep '^LOW: ' | sed 's/^LOW: //')
+out=$(printf '%s\n' "$out" | grep -v '^LOW: ')
+
 # Log: one line when nothing happened, else the interesting lines.
 busy=$(printf '%s\n' "$out" | grep -v -x -E 'DONE|No new orders to import\.|0 variant\(s\) updated|Stock links changed on 0 product\(s\)|Stock levels unchanged')
 if [ -z "$busy" ]; then echo "$(TZ=America/New_York date '+%F %T ET') ok" >> "$LOG"
 else printf '%s\n' "$busy" | sed "s/^/$(TZ=America/New_York date '+%F %T ET') /" >> "$LOG"; fi
 
 # Mail: new errors now, repeats once a day; forget errors that went away.
+# Blips that clear on the next run: hold until a second run in a row hits them.
+blip='HTTP (50[234]|52[0-9])|HTTP/2 stream [0-9]+ was not closed cleanly'
 now=$(date +%s); new=0; seen=()
 while IFS= read -r e; do
     [ -z "$e" ] && continue
     h=$(printf '%s' "$e" | sha1sum | cut -c1-16); seen+=("$h")
-    if [[ "$e" =~ HTTP\ (50[234]|52[0-9]) ]] && [ ! -e "$STATE/again-$h" ]; then
+    if [[ "$e" =~ $blip ]] && [ ! -e "$STATE/again-$h" ]; then
         touch "$STATE/again-$h"; continue
     fi
     last=$(cat "$STATE/err-$h" 2>/dev/null || echo 0)
@@ -87,5 +94,33 @@ if [ "$new" = 1 ]; then
         echo
         echo "Each problem is mailed once, then daily while it lasts. Log: $LOG"
     } | /usr/sbin/sendmail -f tom@moltentech.us -t
+fi
+# Low stock: mail when an item joins the list, else once a day while any is low.
+if [ -z "$lows" ]; then
+    rm -f "$STATE/low-items" "$STATE/low-mailed"
+else
+    items=$(printf '%s\n' "$lows" | cut -f1 | sort)
+    joined=$(comm -13 "$STATE/low-items" <(printf '%s\n' "$items") 2>/dev/null || printf '%s\n' "$items")
+    last=$(cat "$STATE/low-mailed" 2>/dev/null || echo 0)
+    printf '%s\n' "$items" > "$STATE/low-items"
+    if [ -n "$joined" ] || [ $((now - last)) -ge 86400 ]; then
+        echo "$now" > "$STATE/low-mailed"
+        echo "$(TZ=America/New_York date '+%F %T ET') low stock mailed: $(printf '%s' "$items" | tr '\n' ' ')" >> "$LOG"
+        {
+            echo "From: GotGrit shop sync <tom@moltentech.us>"
+            echo "To: $MAIL_TO"
+            echo "Subject: GotGrit low stock: $(printf '%s\n' "$items" | wc -l) item(s)"
+            echo
+            echo "At or below the FA reorder level ($(TZ=America/New_York date '+%F %H:%M ET')):"
+            echo
+            printf '%s\n' "$lows" | awk -F'\t' -v j="$(printf '%s' "$joined" | tr '\n' ' ')" '{
+                n = (index(" " j " ", " " $1 " ") ? "  (new)" : "")
+                printf "- %s %s: %s %s available, reorder at %s%s\n", $1, $2, $3, $5, $4, n }'
+            echo
+            echo "Available = on hand - undelivered orders (bulk counts its sealed cartons)."
+            echo "Reorder levels: FA, Items and Inventory, Reorder Levels. Mailed when an item"
+            echo "goes low, then once a day while any is low."
+        } | /usr/sbin/sendmail -f tom@moltentech.us -t
+    fi
 fi
 exit 0
