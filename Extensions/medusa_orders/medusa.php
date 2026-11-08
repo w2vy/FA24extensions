@@ -295,7 +295,7 @@ if ($action == 'cartons') {
     }
     $loc = medusa_get('location', 'DEF');
     $cartons = medusa_cartons();
-    display_note("Sealed cartons at $loc (Configuration: cartons). Opening posts one inventory adjustment: −N carton, +N × size bulk at the carton's cost. Boxes waiting on undelivered orders are never opened.", 0, 1);
+    display_note("Sealed cartons at $loc (Configuration: cartons). Opening posts one inventory adjustment: minus N cartons, plus N x size of bulk, at the carton's cost. Boxes waiting on undelivered orders are never opened.", 0, 1);
     start_table(TABLESTYLE);
     table_header(array("Carton", "Opens into", "Sealed", "Waiting as boxes", "Can open", "Bulk on hand"));
     $k = 0;
@@ -304,13 +304,13 @@ if ($action == 'cartons') {
         $can = medusa_openable($carton, $loc);
         alt_table_row_color($k);
         label_cell($carton);
-        label_cell($c[0]." × ".round($c[1], 4));
+        label_cell($c[0]." x ".round($c[1], 4));
         qty_cell(max(0.0, medusa_qoh($carton, $loc)), false, 0);
         qty_cell(medusa_undelivered($carton, $loc), false, 0);
         qty_cell($can, false, 0);
         qty_cell(medusa_qoh($c[0], $loc), false, 2);
         end_row();
-        if ($can >= 1) $choices[$carton] = "$carton → ".round($c[1], 4)." ".$c[0]." ($can sealed)";
+        if ($can >= 1) $choices[$carton] = "$carton: ".round($c[1], 4)." ".$c[0]." ($can sealed)";
     }
     if (!count($cartons)) label_row("", "No cartons set under Configuration.", "colspan=5");
     end_table(1);
