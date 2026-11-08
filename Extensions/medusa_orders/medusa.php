@@ -34,7 +34,7 @@ if (isset($_POST['action'])) $action = $_POST['action'];
 if (!$found && $action != 'create') $action = 'show';
 if ($found) medusa_upgrade_table();
 
-$SETTINGS = array('url', 'fallback_url', 'apikey', 'stripekey', 'startorder', 'taxgroup', 'bank', 'location', 'dispatchfrom', 'cartons');
+$SETTINGS = array('url', 'fallback_url', 'apikey', 'stripekey', 'startorder', 'taxgroup', 'bank', 'location', 'dispatchfrom', 'cartons', 'boxes');
 
 if ($action == 'create') {
     medusa_create_table();
@@ -168,6 +168,7 @@ if ($action == 'show') {
         locations_list_row(_("Shop stock location:"), 'location', medusa_get('location', 'DEF'));
         text_row("Auto-dispatch from sales order # (blank = off)", 'dispatchfrom', medusa_get('dispatchfrom'), 10, 20);
         textarea_row("Sealed cartons that open into bulk<br>(one per line: AA509 = WAO9 * 44)", 'cartons', medusa_get('cartons'), 30, 6);
+        textarea_row("Packing boxes: shop box = FA item<br>(one per line: MFRB = MFRB)", 'boxes', medusa_get('boxes'), 30, 4);
     }
     end_table(1);
     if (!$found) {

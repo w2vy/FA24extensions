@@ -63,6 +63,35 @@ function medusa_cartons() {
     return $out;
 }
 
+/**
+ * Packing boxes (setting "boxes", one per line: "MFRB = MFRB"): the shop's box
+ * name (src/modules/easypost/packing.ts) => FA item. Each box an order shipped
+ * in (fulfillment data.boxes) becomes a $0 line, so dispatch takes it out of stock.
+ */
+function medusa_boxes() {
+    $out = array();
+    foreach (preg_split('/[\r\n]+/', medusa_get('boxes')) as $l) {
+        if (preg_match('/^\s*(.+?)\s*=\s*(\S+)\s*$/', $l, $m))
+            $out[$m[1]] = $m[2];
+    }
+    return $out;
+}
+
+/** [FA item => count] for the boxes this order shipped in; unknown names go to $unmapped. */
+function medusa_order_boxes($o, &$unmapped) {
+    $map = medusa_boxes();
+    $out = array();
+    foreach ((array)(isset($o['fulfillments']) ? $o['fulfillments'] : array()) as $f) {
+        if (!empty($f['canceled_at'])) continue;
+        foreach ((array)(isset($f['data']['boxes']) ? $f['data']['boxes'] : array()) as $b) {
+            if ($b == 'own carton') continue;   // ships in the item's own carton
+            if (!isset($map[$b])) { $unmapped[$b] = true; continue; }
+            $out[$map[$b]] = (isset($out[$map[$b]]) ? $out[$map[$b]] : 0) + 1;
+        }
+    }
+    return $out;
+}
+
 // ---- HTTP -------------------------------------------------------------------
 
 /** GET/POST JSON; returns [http status, decoded body or null, error text]. */
@@ -144,7 +173,7 @@ $MEDUSA_ORDER_FIELDS = 'id,display_id,email,created_at,currency_code,status,paym
     . 'items.tax_lines.code,items.variant.metadata,'
     . 'payment_collections.payments.id,payment_collections.payments.amount,payment_collections.payments.data,'
     . 'payment_collections.payments.captured_at,payment_collections.payments.canceled_at,'
-    . 'payment_collections.payments.refunds.amount';
+    . 'payment_collections.payments.refunds.amount,fulfillments.data,fulfillments.canceled_at';
 
 /** Paid, then refunded in full before it shipped: only Stripe's kept fee goes into FA. */
 function medusa_order_refunded_unshipped($o) {
@@ -302,6 +331,12 @@ function medusa_fa_lines($it, $sales_type) {
     return array(array($it['variant_sku'], $qty, $list, 1.0 - $paid / $list));
 }
 
+function medusa_qty_list($list) {
+    $t = array();
+    foreach ($list as $k => $v) $t[] = "$v $k";
+    return implode(', ', $t);
+}
+
 /** Imports one Medusa order; returns [ok, a line of text for the screen]. Throws nothing: errors come back as text. */
 function medusa_import_order($o, $opts) {
     global $Refs;
@@ -319,6 +354,11 @@ function medusa_import_order($o, $opts) {
         if (fa_get_item_code_id_m($it['variant_sku']) === false && empty($it['variant']['metadata']['fa_kit']))
             return array(false, "Order #$n: SKU ".$it['variant_sku']." is not in FA, skipped");
     }
+    $unmapped = array();
+    $boxes = medusa_order_boxes($o, $unmapped);
+    foreach ($boxes as $sku => $q)
+        if (fa_get_item_code_id_m($sku) === false)
+            return array(false, "Order #$n: box item $sku is not in FA, skipped");
 
     // Stripe fees first: nothing is written unless every fee is known (or unknown by design).
     $fees = array();
@@ -356,6 +396,8 @@ function medusa_import_order($o, $opts) {
     foreach ($o['items'] as $it)
         foreach (medusa_fa_lines($it, $opts['sales_type']) as $l)
             add_to_order($cart, $l[0], $l[1], $l[2], $l[3]);
+    foreach ($boxes as $sku => $q)
+        add_to_order($cart, $sku, $q, 0, 0);
     $order_no = $cart->write(0);
 
     // One FA customer payment per captured Stripe payment, net of its refunds (a refund
@@ -395,7 +437,9 @@ function medusa_import_order($o, $opts) {
     }
     commit_transaction();
     return array(true, "Order #$n -> FA sales order $order_no for $name" . ($is_new ? ' (new customer)' : '')
-        . (count($pays) ? '; payment ' . implode(', ', $pays) : '; no captured payment'));
+        . (count($pays) ? '; payment ' . implode(', ', $pays) : '; no captured payment')
+        . (count($boxes) ? '; boxes ' . medusa_qty_list($boxes) : '')
+        . (count($unmapped) ? '; box not in the boxes setting: ' . implode(', ', array_keys($unmapped)) : ''));
 }
 
 /** A refunded, unshipped order: one FA bank payment of the kept Stripe fee(s) to the bank charge account. */
