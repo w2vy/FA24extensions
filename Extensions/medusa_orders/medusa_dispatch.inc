@@ -85,6 +85,31 @@ function medusa_undelivered($sku, $loc) {
     return round((float)$row[0], 6);
 }
 
+/**
+ * Items at or below their FA reorder level (Inventory, Reorder Levels) at $loc:
+ * [[stock_id, description, available, reorder level, units]]. Available = on hand
+ * − undelivered sales orders; a bulk item also counts its sealed cartons
+ * (setting "cartons"), since dispatch opens one when the bulk runs short.
+ */
+function medusa_low_stock($loc) {
+    $per = array();   // bulk => [[carton, bulk qty per carton]]
+    foreach (medusa_cartons() as $carton => $c) $per[$c[0]][] = array($carton, $c[1]);
+    $avail = function ($sku) use ($loc) { return medusa_qoh($sku, $loc) - medusa_undelivered($sku, $loc); };
+    $out = array();
+    $res = db_query("SELECT l.stock_id, s.description, s.units, l.reorder_level FROM ".TB_PREF."loc_stock l"
+        ." JOIN ".TB_PREF."stock_master s ON s.stock_id = l.stock_id"
+        ." WHERE l.loc_code = ".db_escape($loc)." AND l.reorder_level > 0 AND s.inactive = 0 ORDER BY l.stock_id",
+        "reorder levels");
+    while ($r = db_fetch_assoc($res)) {
+        $q = $avail($r['stock_id']);
+        if (isset($per[$r['stock_id']]))
+            foreach ($per[$r['stock_id']] as $c) $q += max(0.0, $avail($c[0])) * $c[1];
+        if ($q <= (float)$r['reorder_level'])
+            $out[] = array($r['stock_id'], $r['description'], round($q, 2), (float)$r['reorder_level'], $r['units']);
+    }
+    return $out;
+}
+
 /** Simulated stock of $sku at $loc, read from FA the first time. */
 function medusa_avail_init(&$avail, $sku, $loc) {
     $k = "$loc|$sku";

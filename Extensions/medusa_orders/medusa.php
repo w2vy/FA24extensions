@@ -56,7 +56,8 @@ if ($action == 'update') {
 // Dispatch last: it moves stock within the pools and off undelivered orders by the
 // same amount, so the push sends the same numbers either way, and a dispatch that
 // dies mid-run can't hold the push back.
-// "ERROR: " lines are mailed; "DONE" last means the run finished.
+// "ERROR: " lines are mailed; "LOW: " lines (stock at or below its reorder level)
+// are mailed as one list; "DONE" last means the run finished.
 if ($action == 'cron') {
     header('Content-Type: text/plain; charset=utf-8');
     $opts = medusa_import_opts();
@@ -72,6 +73,8 @@ if ($action == 'cron') {
         list($lines, $errors) = medusa_run_dispatch();
         foreach ($lines as $l) echo "$l\n";
         foreach ($errors as $e) echo "ERROR: $e\n";
+        foreach (medusa_low_stock(medusa_get('location', 'DEF')) as $l)
+            echo "LOW: $l[0]\t$l[1]\t$l[2]\t$l[3]\t$l[4]\n";
     }
     global $MEDUSA_ROUTE;
     if ($MEDUSA_ROUTE) echo "ROUTE: ".$MEDUSA_ROUTE[0]." failed (".$MEDUSA_ROUTE[1]."); used ".$MEDUSA_ROUTE[2]."\n";
