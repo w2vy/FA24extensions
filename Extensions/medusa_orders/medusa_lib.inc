@@ -140,7 +140,7 @@ function medusa_stripe_fee($charge_id) {
 
 $MEDUSA_ORDER_FIELDS = 'id,display_id,email,created_at,currency_code,status,payment_status,fulfillment_status,metadata,'
     . 'shipping_subtotal,tax_total,total,*shipping_address,*billing_address,'
-    . 'items.variant_sku,items.title,items.quantity,items.unit_price,items.subtotal,'
+    . 'items.variant_sku,items.title,items.quantity,items.unit_price,items.subtotal,items.discount_subtotal,'
     . 'items.tax_lines.code,items.variant.metadata,'
     . 'payment_collections.payments.id,payment_collections.payments.amount,payment_collections.payments.data,'
     . 'payment_collections.payments.captured_at,payment_collections.payments.canceled_at,'
@@ -272,10 +272,15 @@ function medusa_branch($debtor_no, $addr, $taxgid) {
  * price + the chosen pitch × slot qty, discounted so the two add up to what
  * the customer paid. Any other line: the FA list price, discounted down to
  * the price paid (as woo_orders).
+ * Paid = unit price less the line's share of a promotion (before tax); the
+ * only one is the shop's 2% Bank Payment Discount on bulk paid by ACH, so it
+ * lands in FA as a line discount (sales discount account).
  */
 function medusa_fa_lines($it, $sales_type) {
     $qty = (float)$it['quantity'];
     $paid = (float)$it['unit_price'];
+    if ($qty > 0 && !empty($it['discount_subtotal']))
+        $paid = round($paid - (float)$it['discount_subtotal'] / $qty, 4);
     $meta = isset($it['variant']['metadata']) ? (array)$it['variant']['metadata'] : array();
     if (!empty($meta['fa_kit'])) {
         $kit = $meta['fa_kit'];
