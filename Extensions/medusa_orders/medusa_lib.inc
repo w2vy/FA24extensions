@@ -337,6 +337,22 @@ function medusa_qty_list($list) {
     return implode(', ', $t);
 }
 
+/**
+ * The FA location for an order. A bulk order (every line a sealed carton, setting
+ * "cartons") ships from Salem, so it goes to the "Bulk order location" setting:
+ * its carton is received there and delivered from there, and never counts in the
+ * shop's stock. The shop never mixes bulk with anything else. Any other order
+ * keeps the branch's location.
+ */
+function medusa_order_location($o, $default) {
+    $bulk = medusa_get('bulklocation');
+    if ($bulk == '' || !count($o['items'])) return $default;
+    $cartons = medusa_cartons();
+    foreach ($o['items'] as $it)
+        if (!isset($cartons[$it['variant_sku']])) return $default;
+    return $bulk;
+}
+
 /** Imports one Medusa order; returns [ok, a line of text for the screen]. Throws nothing: errors come back as text. */
 function medusa_import_order($o, $opts) {
     global $Refs;
@@ -392,7 +408,7 @@ function medusa_import_order($o, $opts) {
     $cart->delivery_address = $branch['br_address'];
     $cart->set_branch($branch['branch_code'], $taxgid, '', isset($a['phone']) ? $a['phone'] : '', $email);
     $cart->freight_cost = round((float)$o['shipping_subtotal'], 2);
-    $cart->Location = $branch['default_location'];
+    $cart->Location = medusa_order_location($o, $branch['default_location']);
     foreach ($o['items'] as $it)
         foreach (medusa_fa_lines($it, $opts['sales_type']) as $l)
             add_to_order($cart, $l[0], $l[1], $l[2], $l[3]);
