@@ -56,8 +56,9 @@ if ($action == 'update') {
 // Dispatch last: it moves stock within the pools and off undelivered orders by the
 // same amount, so the push sends the same numbers either way, and a dispatch that
 // dies mid-run can't hold the push back.
-// "ERROR: " lines are mailed; "LOW: " lines (stock at or below its reorder level)
-// are mailed as one list; "DONE" last means the run finished.
+// "ERROR: " lines are mailed (then daily); "HELD: " lines (orders waiting on a purchase
+// order that is not overdue) are mailed once; "LOW: " lines (stock at or below its
+// reorder level) are mailed as one list; "DONE" last means the run finished.
 if ($action == 'cron') {
     header('Content-Type: text/plain; charset=utf-8');
     $opts = medusa_import_opts();
@@ -70,9 +71,10 @@ if ($action == 'cron') {
         list($lines, $errors) = medusa_run_push();
         foreach ($lines as $l) echo "$l\n";
         foreach ($errors as $e) echo "ERROR: $e\n";
-        list($lines, $errors) = medusa_run_dispatch();
+        list($lines, $errors, $held) = medusa_run_dispatch();
         foreach ($lines as $l) echo "$l\n";
         foreach ($errors as $e) echo "ERROR: $e\n";
+        foreach ($held as $h) echo "HELD: $h\n";
         foreach (medusa_low_stock(medusa_get('location', 'DEF')) as $l)
             echo "LOW: $l[0]\t$l[1]\t$l[2]\t$l[3]\t$l[4]\n";
     }
@@ -108,7 +110,8 @@ if ($action == 'p_push') {
 $dispatch_log = array();
 $dispatch_errors = array();
 if ($action == 'd_dispatch') {
-    list($dispatch_log, $dispatch_errors) = medusa_run_dispatch();
+    list($dispatch_log, $dispatch_errors, $dispatch_held) = medusa_run_dispatch();
+    $dispatch_errors = array_merge($dispatch_errors, $dispatch_held);
     $action = 'dispatch';
 }
 
@@ -267,8 +270,15 @@ if ($action == 'dispatch') {
     $k = 0;
     $avail = array();
     $orders = $from ? medusa_orders_to_dispatch($from) : array();
-    foreach ($orders as $so) {
-        list($wos, $short, $opens) = medusa_dispatch_plan($so, $avail);
+    $plans = array();
+    $held = array();
+    foreach ($orders as $i => $so) {
+        $plans[$i] = medusa_dispatch_plan($so, $avail);
+        if (count($plans[$i][1])) $held[] = array($so, $plans[$i][1]);
+    }
+    list($texts) = medusa_held_notes($held, $avail);
+    foreach ($orders as $i => $so) {
+        list($wos, $short, $opens) = $plans[$i];
         $make = array();
         foreach ($wos as $w) $make[$w[0]] = (isset($make[$w[0]]) ? $make[$w[0]] : 0) + $w[1];
         alt_table_row_color($k);
@@ -277,7 +287,7 @@ if ($action == 'dispatch') {
         label_cell($so['customer_ref']);
         label_cell(count($short) ? '' : medusa_opens_text($opens));
         label_cell(medusa_qty_text($make));
-        label_cell(count($short) ? "<font color=red>".medusa_qty_text($short)."</font>" : '');
+        label_cell(count($short) ? "<font color=red>".$texts[$so['order_no']]."</font>" : '');
         end_row();
     }
     if ($from && !count($orders)) label_row("", "Nothing waiting.", "colspan=4");
