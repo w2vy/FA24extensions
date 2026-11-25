@@ -12,7 +12,8 @@ date, and the order's payment(s) allocated to the invoice. A bulk item that
 runs short is refilled by opening sealed cartons of it (setting "cartons":
 an inventory adjustment −N carton / +N × qty bulk at the carton's cost).
 Short anywhere in the tree = the order is held (nothing posted) and retried
-next run.
+next run. A shortage that open purchase orders cover in time is mailed once;
+one not on order, or on an overdue purchase order, daily (medusa_held_notes).
 
 Only imported orders (cust_ref "Medusa Order # N" / "Woo Order # N") from the
 "dispatch from" sales order on; blank = off.
@@ -121,7 +122,7 @@ function medusa_avail_init(&$avail, $sku, $loc) {
  * Takes $qty of $sku at $loc from the simulated stock $avail; a short bulk item
  * is refilled from sealed cartons ($opens: [carton, n, bulk, bulk qty, loc]);
  * the rest is made through the BOM. Work orders go to $wos deepest first; what
- * can't be had or made goes to $short.
+ * can't be had or made goes to $short ("loc|sku" => qty).
  */
 function medusa_need($sku, $qty, $loc, &$avail, &$wos, &$short, &$opens, $depth = 0) {
     $flag = medusa_mb_flag($sku);
@@ -147,15 +148,18 @@ function medusa_need($sku, $qty, $loc, &$avail, &$wos, &$short, &$opens, $depth 
     if ($rest <= 0) return;
     $bom = medusa_bom($sku);
     if ($flag != 'M' || !count($bom) || $depth > 10) {
-        $short[$sku] = (isset($short[$sku]) ? $short[$sku] : 0) + $rest;
+        $short[$k] = (isset($short[$k]) ? $short[$k] : 0) + $rest;
         return;
     }
     foreach ($bom as $c) medusa_need($c[0], $rest * $c[1], $c[2], $avail, $wos, $short, $opens, $depth + 1);
     $wos[] = array($sku, $rest, $loc);
 }
 
-/** What one order needs: [work orders, shortages, cartons to open]. $avail is updated only when nothing is short. */
-function medusa_dispatch_plan($so, &$avail) {
+/**
+ * What one order needs: [work orders, shortages, cartons to open]. $avail is updated
+ * only when nothing is short, or always with $keep.
+ */
+function medusa_dispatch_plan($so, &$avail, $keep = false) {
     $try = $avail;
     $wos = array();
     $short = array();
@@ -163,13 +167,111 @@ function medusa_dispatch_plan($so, &$avail) {
     $res = db_query("SELECT stk_code, quantity - qty_sent q FROM ".TB_PREF."sales_order_details WHERE order_no = "
         .(int)$so['order_no']." AND trans_type = ".ST_SALESORDER." AND quantity > qty_sent ORDER BY id", "order lines");
     while ($r = db_fetch_assoc($res)) medusa_need($r['stk_code'], (float)$r['q'], $so['from_stk_loc'], $try, $wos, $short, $opens);
-    if (!count($short)) $avail = $try;
+    if ($keep || !count($short)) $avail = $try;
     return array($wos, $short, $opens);
+}
+
+/**
+ * What is still to come on purchase orders: "loc|sku" => [[po, due yyyy-mm-dd, qty], ...],
+ * on-time lines first, then by due date.
+ */
+function medusa_open_pos($today) {
+    $out = array();
+    $res = db_query("SELECT d.order_no, d.item_code, d.delivery_date, d.quantity_ordered - d.quantity_received q,"
+        ." o.into_stock_location loc FROM ".TB_PREF."purch_order_details d"
+        ." JOIN ".TB_PREF."purch_orders o ON o.order_no = d.order_no"
+        ." WHERE d.quantity_ordered > d.quantity_received"
+        ." ORDER BY d.delivery_date < ".db_escape($today).", d.delivery_date, d.order_no, d.po_detail_item", "open purchase orders");
+    while ($r = db_fetch_assoc($res))
+        $out[$r['loc'].'|'.$r['item_code']][] = array((int)$r['order_no'], $r['delivery_date'], round((float)$r['q'], 6));
+    return $out;
+}
+
+/**
+ * Takes $qty of the short item $k ("loc|sku") from the purchase orders $pos: its own
+ * lines, then sealed cartons of it (opened the way dispatch does: never a box an
+ * order waits for). Returns [qty not on order, [po => due, ...]].
+ */
+function medusa_take_pos($k, $qty, &$pos) {
+    list($loc, $sku) = explode('|', $k, 2);
+    $from = array();
+    $take = function () use ($k, &$qty, &$pos, &$from) {
+        if (isset($pos[$k]))
+            foreach ($pos[$k] as $i => $l) {
+                $n = min($l[2], $qty);
+                if ($n <= 0.000001) continue;
+                $pos[$k][$i][2] = round($l[2] - $n, 6);
+                $qty = round($qty - $n, 6);
+                if (!isset($from[$l[0]]) || $from[$l[0]] < $l[1]) $from[$l[0]] = $l[1];
+            }
+    };
+    $take();
+    foreach (medusa_cartons() as $carton => $c) {
+        $ck = "$loc|$carton";
+        if ($c[0] != $sku || !isset($pos[$ck])) continue;
+        $ok = "$ck|open";
+        if (!isset($pos[$ok])) {
+            $waiting = max(0.0, medusa_undelivered($carton, $loc) - max(0.0, medusa_qoh($carton, $loc)));
+            $pos[$ok] = max(0.0, array_sum(array_column($pos[$ck], 2)) - $waiting);
+        }
+        foreach ($pos[$ck] as $i => $l) {
+            if ($qty <= 0.000001) break;
+            $n = min(floor(min($pos[$ok], $l[2]) + 0.000001), ceil(round($qty / $c[1], 6)));
+            if ($n < 1) continue;
+            $pos[$ck][$i][2] = round($l[2] - $n, 6);
+            $pos[$ok] = round($pos[$ok] - $n, 6);
+            $pos[$k][] = array($l[0], $l[1], round($n * $c[1], 6));
+            $take();
+        }
+    }
+    return array($qty, $from);
+}
+
+/**
+ * The held orders' shortages against the open purchase orders, oldest order first;
+ * all of them share the stock ($avail: left after the orders that can go) and the
+ * purchase orders. $held: [[sales order, shortages], ...]. Returns
+ * [[order_no => "STONE 2.125 (not on order), ..."], [order_no => true when all of it
+ * is on purchase orders not overdue]].
+ */
+function medusa_held_notes($held, $avail) {
+    $today = date2sql(Today());
+    $pos = medusa_open_pos($today);
+    $texts = array();
+    $covered = array();
+    foreach ($held as $h) {
+        list($so, $short) = $h;
+        // Older held orders keep what they would use, so this one may need more than its own shortage.
+        list(, $need) = medusa_dispatch_plan($so, $avail, true);
+        $t = array();
+        $ok = true;
+        foreach ($short as $k => $q) {
+            list($left, $from) = medusa_take_pos($k, max($q, isset($need[$k]) ? $need[$k] : 0), $pos);
+            $on = array();
+            foreach ($from as $po => $due) {
+                $late = $due < $today;
+                $on[] = "PO $po ".($late ? 'overdue since' : 'due')." $due";
+                if ($late) $ok = false;
+            }
+            if ($left > 0.000001) {
+                $ok = false;
+                $note = count($on) ? 'only part on order: '.implode(', ', $on) : 'not on order';
+            } else
+                $note = 'on '.implode(', ', $on);
+            $t[] = medusa_qty_text(array($k => $q))." ($note)";
+        }
+        $texts[$so['order_no']] = implode(', ', $t);
+        $covered[$so['order_no']] = $ok;
+    }
+    return array($texts, $covered);
 }
 
 function medusa_qty_text($list) {
     $t = array();
-    foreach ($list as $k => $v) $t[] = "$k ".round($v, 4);
+    foreach ($list as $k => $v) {
+        if (strpos($k, '|') !== false) $k = substr($k, strpos($k, '|') + 1);   // shortages are "loc|sku"
+        $t[] = "$k ".round($v, 4);
+    }
     return implode(', ', $t);
 }
 
@@ -344,17 +446,23 @@ function medusa_dispatch_order($so, $wos, $opens = array()) {
         .(count($made) ? '; made '.implode(', ', $made) : ''), $warn);
 }
 
-/** Dispatches every waiting order; returns [lines, errors]. Off (nothing) when "dispatch from" is blank. */
+/**
+ * Dispatches every waiting order; returns [lines, errors, held]: held = orders whose
+ * shortage is on purchase orders not overdue (mailed once, not daily). Off (nothing)
+ * when "dispatch from" is blank.
+ */
 function medusa_run_dispatch() {
     $lines = array();
     $errors = array();
+    $quiet = array();
+    $held = array();
     $from = medusa_dispatch_from();
-    if (!$from) return array($lines, $errors);
+    if (!$from) return array($lines, $errors, $quiet);
     $avail = array();
     foreach (medusa_orders_to_dispatch($from) as $so) {
         list($wos, $short, $opens) = medusa_dispatch_plan($so, $avail);
         if (count($short)) {
-            $errors[] = "{$so['customer_ref']} (SO {$so['order_no']}) held, short: ".medusa_qty_text($short);
+            $held[] = array($so, $short);
             continue;
         }
         try {
@@ -367,5 +475,12 @@ function medusa_run_dispatch() {
         if ($warn != '') $errors[] = $warn;
         $avail = array();   // posted: read stock again
     }
-    return array($lines, $errors);
+    if (count($held)) {
+        list($texts, $covered) = medusa_held_notes($held, $avail);
+        foreach ($held as $h) {
+            $t = "{$h[0]['customer_ref']} (SO {$h[0]['order_no']}) held, short: ".$texts[$h[0]['order_no']];
+            if ($covered[$h[0]['order_no']]) $quiet[] = $t; else $errors[] = $t;
+        }
+    }
+    return array($lines, $errors, $quiet);
 }

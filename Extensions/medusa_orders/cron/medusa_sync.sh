@@ -3,6 +3,8 @@
 # orders, then pushes prices + stock to the shop (medusa.php action=cron).
 # Config ~/.config/medusa-sync.env (mode 600): FA_URL FA_USER FA_PASS MAIL_TO.
 # Mails each error the first time it shows, then once a day while it lasts.
+# HELD: orders short of stock that a purchase order not yet overdue covers;
+# mailed once, then only logged (FA sends ERROR again when it goes overdue).
 # A 502/503/504/52x from the shop (dev backend mid-rebuild, a Cloudflare blip)
 # or an HTTP/2 stream reset is mailed only when the next run hits it again.
 # ROUTE: the shop URL (www, through Cloudflare) failed and FA used the Flux
@@ -67,6 +69,21 @@ while IFS= read -r e; do
     last=$(cat "$STATE/err-$h" 2>/dev/null || echo 0)
     if [ $((now - last)) -ge 86400 ]; then new=1; echo "$now" > "$STATE/err-$h"; fi
 done <<< "$errors"
+# Held on a purchase order: mailed once. Forgotten only by a run that finished,
+# so one failed run can't mail them all again.
+held=$(printf '%s\n' "$out" | grep '^HELD: ' | sed 's/^HELD: //')
+newheld=''; heldseen=()
+while IFS= read -r e; do
+    [ -z "$e" ] && continue
+    h=$(printf '%s' "$e" | sha1sum | cut -c1-16); heldseen+=("$h")
+    [ -e "$STATE/held-$h" ] || { newheld+="$e"$'\n'; touch "$STATE/held-$h"; }
+done <<< "$held"
+if printf '%s\n' "$out" | grep -qx 'DONE'; then
+    for f in "$STATE"/held-*; do
+        [ -e "$f" ] || continue
+        [[ " ${heldseen[*]:-} " == *" ${f##*/held-} "* ]] || rm -f "$f"
+    done
+fi
 for f in "$STATE"/err-* "$STATE"/again-*; do
     [ -e "$f" ] || continue
     h=${f##*/err-}; h=${h##*/again-}; [[ " ${seen[*]:-} " == *" $h "* ]] || rm -f "$f"
@@ -80,6 +97,19 @@ if [ -n "$recovered" ]; then
         echo "$recovered"
         echo
         echo "Log: $LOG"
+    } | /usr/sbin/sendmail -f tom@moltentech.us -t
+fi
+if [ -n "$newheld" ]; then
+    {
+        echo "From: GotGrit shop sync <tom@moltentech.us>"
+        echo "To: $MAIL_TO"
+        echo "Subject: GotGrit orders waiting on a purchase order: $(printf '%s' "$newheld" | wc -l)"
+        echo
+        echo "Held until the stock is received in FA ($(TZ=America/New_York date '+%F %H:%M ET')):"
+        echo
+        printf '%s' "$newheld" | sed 's/^/- /'
+        echo
+        echo "Mailed once. Mailed again if the purchase order goes overdue or changes. Log: $LOG"
     } | /usr/sbin/sendmail -f tom@moltentech.us -t
 fi
 if [ "$new" = 1 ]; then
