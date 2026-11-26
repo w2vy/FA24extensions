@@ -57,8 +57,9 @@ if ($action == 'update') {
 // same amount, so the push sends the same numbers either way, and a dispatch that
 // dies mid-run can't hold the push back.
 // "ERROR: " lines are mailed (then daily); "HELD: " lines (orders waiting on a purchase
-// order that is not overdue) are mailed once; "LOW: " lines (stock at or below its
-// reorder level) are mailed as one list; "DONE" last means the run finished.
+// order that is not overdue) are mailed once; "LOW: " lines (stock plus what
+// purchase orders not overdue will bring, at or below its reorder level) are mailed
+// as one list; "DONE" last means the run finished.
 if ($action == 'cron') {
     header('Content-Type: text/plain; charset=utf-8');
     $opts = medusa_import_opts();
@@ -76,7 +77,7 @@ if ($action == 'cron') {
         foreach ($errors as $e) echo "ERROR: $e\n";
         foreach ($held as $h) echo "HELD: $h\n";
         foreach (medusa_low_stock(medusa_get('location', 'DEF')) as $l)
-            echo "LOW: $l[0]\t$l[1]\t$l[2]\t$l[3]\t$l[4]\n";
+            echo "LOW: $l[0]\t$l[1]\t$l[2]\t$l[3]\t$l[4]\t$l[5]\n";
     }
     global $MEDUSA_ROUTE;
     if ($MEDUSA_ROUTE) echo "ROUTE: ".$MEDUSA_ROUTE[0]." failed (".$MEDUSA_ROUTE[1]."); used ".$MEDUSA_ROUTE[2]."\n";

@@ -10,7 +10,8 @@
 # ROUTE: the shop URL (www, through Cloudflare) failed and FA used the Flux
 # address instead; mailed after ROUTE_MAIL_AFTER runs in a row (default 3),
 # with one more mail when the shop URL works again.
-# LOW: items at or below their FA reorder level, mailed as one list when an
+# LOW: items whose stock plus what purchase orders not overdue will bring is at
+# or below their FA reorder level, mailed as one list when an
 # item joins it, then once a day while any is low.
 set -u
 . "$HOME/.config/medusa-sync.env"
@@ -141,13 +142,15 @@ else
             echo "To: $MAIL_TO"
             echo "Subject: GotGrit low stock: $(printf '%s\n' "$items" | wc -l) item(s)"
             echo
-            echo "At or below the FA reorder level ($(TZ=America/New_York date '+%F %H:%M ET')):"
+            echo "At or below the FA reorder level, counting purchase orders not overdue ($(TZ=America/New_York date '+%F %H:%M ET')):"
             echo
             printf '%s\n' "$lows" | awk -F'\t' -v j="$(printf '%s' "$joined" | tr '\n' ' ')" '{
                 n = (index(" " j " ", " " $1 " ") ? "  (new)" : "")
-                printf "- %s %s: %s %s available, reorder at %s%s\n", $1, $2, $3, $5, $4, n }'
+                o = ($6 + 0 > 0 ? " + " $6 " on order" : "")
+                printf "- %s %s: %s %s available%s, reorder at %s%s\n", $1, $2, $3, $5, o, $4, n }'
             echo
             echo "Available = on hand - undelivered orders (bulk counts its sealed cartons)."
+            echo "On order = open purchase orders not overdue; an overdue one stops counting."
             echo "Reorder levels: FA, Items and Inventory, Reorder Levels. Mailed when an item"
             echo "goes low, then once a day while any is low."
         } | /usr/sbin/sendmail -f tom@moltentech.us -t
