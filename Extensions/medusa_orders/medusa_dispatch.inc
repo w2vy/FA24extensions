@@ -88,13 +88,24 @@ function medusa_undelivered($sku, $loc) {
 
 /**
  * Items at or below their FA reorder level (Inventory, Reorder Levels) at $loc:
- * [[stock_id, description, available, reorder level, units]]. Available = on hand
- * − undelivered sales orders; a bulk item also counts its sealed cartons
- * (setting "cartons"), since dispatch opens one when the bulk runs short.
+ * [[stock_id, description, available, reorder level, units, on order]].
+ * Available = on hand − undelivered sales orders; on order = what purchase orders
+ * not yet overdue still have to deliver into $loc (an overdue one stops counting,
+ * so the item comes back on the list). An item is low when available + on order
+ * is at or below its reorder level. A bulk item also counts its sealed cartons
+ * (setting "cartons"), in stock or on order, since dispatch opens one when the
+ * bulk runs short.
  */
 function medusa_low_stock($loc) {
     $per = array();   // bulk => [[carton, bulk qty per carton]]
     foreach (medusa_cartons() as $carton => $c) $per[$c[0]][] = array($carton, $c[1]);
+    $today = date2sql(Today());
+    $ordered = array();   // sku => qty on purchase orders not overdue, into $loc
+    foreach (medusa_open_pos($today) as $k => $lines) {
+        list($l, $sku) = explode('|', $k, 2);
+        if ($l != $loc) continue;
+        foreach ($lines as $p) if ($p[1] >= $today) $ordered[$sku] = round(($ordered[$sku] ?? 0) + $p[2], 6);
+    }
     $avail = function ($sku) use ($loc) { return medusa_qoh($sku, $loc) - medusa_undelivered($sku, $loc); };
     $out = array();
     $res = db_query("SELECT l.stock_id, s.description, s.units, l.reorder_level FROM ".TB_PREF."loc_stock l"
@@ -103,10 +114,16 @@ function medusa_low_stock($loc) {
         "reorder levels");
     while ($r = db_fetch_assoc($res)) {
         $q = $avail($r['stock_id']);
+        $o = (float)($ordered[$r['stock_id']] ?? 0);
         if (isset($per[$r['stock_id']]))
-            foreach ($per[$r['stock_id']] as $c) $q += max(0.0, $avail($c[0])) * $c[1];
-        if ($q <= (float)$r['reorder_level'])
-            $out[] = array($r['stock_id'], $r['description'], round($q, 2), (float)$r['reorder_level'], $r['units']);
+            foreach ($per[$r['stock_id']] as $c) {
+                $a = $avail($c[0]);
+                $q += max(0.0, $a) * $c[1];
+                // cartons on order, less any an order is already waiting for
+                $o += max(0.0, (float)($ordered[$c[0]] ?? 0) + min(0.0, $a)) * $c[1];
+            }
+        if ($q + $o <= (float)$r['reorder_level'])
+            $out[] = array($r['stock_id'], $r['description'], round($q, 2), (float)$r['reorder_level'], $r['units'], round($o, 2));
     }
     return $out;
 }
