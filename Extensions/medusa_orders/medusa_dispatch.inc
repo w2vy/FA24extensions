@@ -353,13 +353,16 @@ function medusa_tax_cent($so, $invoice, $diff, $ref, $date) {
 /**
  * Opens $n sealed $carton into $bqty of $bulk at $loc: one inventory adjustment,
  * −n carton / +bqty bulk; the bulk takes over the carton's value exactly.
+ * Flags a price check for the bulk (medusa_price_check_add).
  * The caller holds the transaction. Returns the adjustment's trans no.
  */
 function medusa_post_open($carton, $n, $bulk, $bqty, $loc, $date, $memo) {
     global $Refs;
     $cost = get_unit_cost($carton);
     $items = array(new line_item($carton, -$n, $cost, ''), new line_item($bulk, $bqty, round($cost * $n / $bqty, 6), ''));
-    return add_stock_adjustment($items, $loc, $date, $Refs->get_next(ST_INVADJUST, null, $date), $memo);
+    $no = add_stock_adjustment($items, $loc, $date, $Refs->get_next(ST_INVADJUST, null, $date), $memo);
+    medusa_price_check_add($bulk, $carton, $date, $cost);
+    return $no;
 }
 
 /** Sealed cartons of $carton at $loc that can be opened: on hand less every undelivered box. */

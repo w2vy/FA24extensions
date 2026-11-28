@@ -59,7 +59,8 @@ if ($action == 'update') {
 // "ERROR: " lines are mailed (then daily); "HELD: " lines (orders waiting on a purchase
 // order that is not overdue) are mailed once; "LOW: " lines (stock plus what
 // purchase orders not overdue will bring, at or below its reorder level) are mailed
-// as one list; "DONE" last means the run finished.
+// as one list; "PRICE: " lines (a carton opened, its grit's prices to check) are
+// mailed once; "DONE" last means the run finished.
 if ($action == 'cron') {
     header('Content-Type: text/plain; charset=utf-8');
     $opts = medusa_import_opts();
@@ -76,6 +77,7 @@ if ($action == 'cron') {
         foreach ($lines as $l) echo "$l\n";
         foreach ($errors as $e) echo "ERROR: $e\n";
         foreach ($held as $h) echo "HELD: $h\n";
+        foreach (medusa_price_checks() as $bulk => $c) echo "PRICE: ".medusa_price_check_text($bulk, $c)."\n";
         foreach (medusa_low_stock(medusa_get('location', 'DEF')) as $l)
             echo "LOW: $l[0]\t$l[1]\t$l[2]\t$l[3]\t$l[4]\t$l[5]\n";
     }
@@ -123,6 +125,16 @@ if ($action == 'c_open') {
     if ($open_result[0]) meta_forward($_SERVER['PHP_SELF'], "action=cartons&adj=".$open_result[2]);
     $action = 'cartons';
 }
+if ($action == 'c_pcdone') {
+    $pc = get_post('pc_bulk');
+    if (isset(medusa_price_checks()[$pc])) {
+        medusa_price_check_done($pc);
+        meta_forward($_SERVER['PHP_SELF'], "action=cartons&pcdone=".urlencode($pc));
+    }
+    $action = 'cartons';
+}
+if ($action == 'cartons' && isset($_GET['pcdone']))
+    $open_result = array(true, "Price check cleared: ".$_GET['pcdone']);
 if ($action == 'cartons' && isset($_GET['adj']) && (int)$_GET['adj'] > 0)
     $open_result = array(true, "Carton opened: adjustment ".get_trans_view_str(ST_INVADJUST, (int)$_GET['adj']));
 
@@ -340,5 +352,36 @@ if ($action == 'cartons') {
         submit_center('c_open', "Open Carton");
         end_form();
     } else if (count($cartons)) display_note("No sealed carton can be opened.", 0, 1);
+
+    $checks = medusa_price_checks();
+    if (count($checks)) {
+        echo "<br>";
+        display_heading("Price check");
+        display_note("A carton was opened for jars: the jars are now made from stock bought at its price. Put its last paid price and freight in the price sheet, reprice the grit (and the GRIT/GRIND kits), then press Price checked.", 0, 1);
+        start_table(TABLESTYLE);
+        table_header(array("Grit", "Carton", "Opened", "Carton cost", "1 lb Retail now"));
+        $k = 0;
+        $pcs = array();
+        foreach ($checks as $bulk => $c) {
+            alt_table_row_color($k);
+            label_cell($bulk);
+            label_cell($c[0]);
+            label_cell($c[1]);
+            amount_cell($c[2]);
+            $p = db_fetch_row(db_query("SELECT price FROM ".TB_PREF."prices WHERE stock_id = ".db_escape("$bulk-100")
+                ." AND sales_type_id = 1", "retail price"));
+            label_cell($p ? number_format2($p[0], 2) : '-', "align=right");
+            end_row();
+            $pcs[$bulk] = $bulk;
+        }
+        end_table(1);
+        start_form(true);
+        start_table(TABLESTYLE2);
+        array_selector_row("Grit:", 'pc_bulk', null, $pcs);
+        end_table(1);
+        hidden('action', 'c_pcdone');
+        submit_center('c_pcdone', "Price checked");
+        end_form();
+    }
     end_page();
 }

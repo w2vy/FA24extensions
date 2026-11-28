@@ -64,6 +64,37 @@ function medusa_cartons() {
 }
 
 /**
+ * Price checks (tom 2026-11-28): opening a carton or pail for jars means stock
+ * bought at a new price (and freight) is now what the jars are made from, so the
+ * grit's prices need a look. Setting "price_checks" (JSON): bulk => [carton,
+ * first opened date, carton cost]. Kept until "Price checked" on the Open Carton
+ * tab; the timer prints one "PRICE: " line each, mailed once.
+ */
+function medusa_price_checks() {
+    // db_escape stores it HTML-encoded (as import_opts).
+    $v = json_decode(html_entity_decode(medusa_get('price_checks', '{}'), ENT_QUOTES), true);
+    return is_array($v) ? $v : array();
+}
+
+function medusa_price_check_add($bulk, $carton, $date, $cost) {
+    $all = medusa_price_checks();
+    if (isset($all[$bulk])) return;   // already flagged: keep the first opening
+    $all[$bulk] = array($carton, $date, round((float)$cost, 2));
+    medusa_set('price_checks', json_encode($all));
+}
+
+function medusa_price_check_done($bulk) {
+    $all = medusa_price_checks();
+    unset($all[$bulk]);
+    medusa_set('price_checks', json_encode($all));
+}
+
+/** "WAO9: carton AA509 opened 11/28/2026 (cost $255.20); check the WAO9 prices" */
+function medusa_price_check_text($bulk, $c) {
+    return "$bulk: carton {$c[0]} opened {$c[1]} (cost \$".number_format($c[2], 2)."); check the $bulk prices";
+}
+
+/**
  * Packing boxes (setting "boxes", one per line: "MFRB = MFRB"): the shop's box
  * name (src/modules/easypost/packing.ts) => FA item. Each box an order shipped
  * in (fulfillment data.boxes) becomes a $0 line, so dispatch takes it out of stock.
