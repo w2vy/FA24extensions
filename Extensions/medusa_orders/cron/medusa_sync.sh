@@ -10,6 +10,8 @@
 # ROUTE: the shop URL (www, through Cloudflare) failed and FA used the Flux
 # address instead; mailed after ROUTE_MAIL_AFTER runs in a row (default 3),
 # with one more mail when the shop URL works again.
+# PRICE: a carton/pail was opened for jars; check that grit's prices. Mailed
+# once; listed on FA's Open Carton tab until "Price checked".
 # LOW: items whose stock plus what purchase orders not overdue will bring is at
 # or below their FA reorder level, mailed as one list when an
 # item joins it, then once a day while any is low.
@@ -53,7 +55,7 @@ lows=$(printf '%s\n' "$out" | grep '^LOW: ' | sed 's/^LOW: //')
 out=$(printf '%s\n' "$out" | grep -v '^LOW: ')
 
 # Log: one line when nothing happened, else the interesting lines.
-busy=$(printf '%s\n' "$out" | grep -v -x -E 'DONE|No new orders to import\.|0 variant\(s\) updated|Stock links changed on 0 product\(s\)|Stock levels unchanged')
+busy=$(printf '%s\n' "$out" | grep -v '^PRICE: ' | grep -v -x -E 'DONE|No new orders to import\.|0 variant\(s\) updated|Stock links changed on 0 product\(s\)|Stock levels unchanged')
 if [ -z "$busy" ]; then echo "$(TZ=America/New_York date '+%F %T ET') ok" >> "$LOG"
 else printf '%s\n' "$busy" | sed "s/^/$(TZ=America/New_York date '+%F %T ET') /" >> "$LOG"; fi
 
@@ -85,6 +87,20 @@ if printf '%s\n' "$out" | grep -qx 'DONE'; then
         [[ " ${heldseen[*]:-} " == *" ${f##*/held-} "* ]] || rm -f "$f"
     done
 fi
+# Price checks: mailed once each; forgotten (by a run that finished) once cleared in FA.
+prices=$(printf '%s\n' "$out" | grep '^PRICE: ' | sed 's/^PRICE: //')
+newprice=''; priceseen=()
+while IFS= read -r e; do
+    [ -z "$e" ] && continue
+    h=$(printf '%s' "$e" | sha1sum | cut -c1-16); priceseen+=("$h")
+    [ -e "$STATE/price-$h" ] || { newprice+="$e"$'\n'; touch "$STATE/price-$h"; }
+done <<< "$prices"
+if printf '%s\n' "$out" | grep -qx 'DONE'; then
+    for f in "$STATE"/price-*; do
+        [ -e "$f" ] || continue
+        [[ " ${priceseen[*]:-} " == *" ${f##*/price-} "* ]] || rm -f "$f"
+    done
+fi
 for f in "$STATE"/err-* "$STATE"/again-*; do
     [ -e "$f" ] || continue
     h=${f##*/err-}; h=${h##*/again-}; [[ " ${seen[*]:-} " == *" $h "* ]] || rm -f "$f"
@@ -111,6 +127,21 @@ if [ -n "$newheld" ]; then
         printf '%s' "$newheld" | sed 's/^/- /'
         echo
         echo "Mailed once. Mailed again if the purchase order goes overdue or changes. Log: $LOG"
+    } | /usr/sbin/sendmail -f tom@moltentech.us -t
+fi
+if [ -n "$newprice" ]; then
+    {
+        echo "From: GotGrit shop sync <tom@moltentech.us>"
+        echo "To: $MAIL_TO"
+        echo "Subject: GotGrit price check: $(printf '%s' "$newprice" | wc -l) grit(s)"
+        echo
+        echo "A carton was opened for jars ($(TZ=America/New_York date '+%F %H:%M ET')):"
+        echo
+        printf '%s' "$newprice" | sed 's/^/- /'
+        echo
+        echo "Put its last paid price and freight in GotGrit-Prices.xlsx (Materials tab),"
+        echo "reprice the grit to the rule (and the GRIT/GRIND kits), then press"
+        echo "Price checked: FA, Medusa Shop Interface, Open Carton tab. Mailed once."
     } | /usr/sbin/sendmail -f tom@moltentech.us -t
 fi
 if [ "$new" = 1 ]; then
